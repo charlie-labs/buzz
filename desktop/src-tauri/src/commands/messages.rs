@@ -658,6 +658,17 @@ pub async fn has_managed_agent_channel_message_marker(
         .map(|event| event.is_some())
 }
 
+pub(crate) async fn managed_agent_channel_message_event_id_by_marker(
+    state: &AppState,
+    agent_pubkey: &str,
+    channel_id: &str,
+    marker: &str,
+) -> Result<Option<String>, String> {
+    find_managed_agent_channel_message_by_marker(state, Some(agent_pubkey), channel_id, marker)
+        .await
+        .map(|event| event.map(|event| event.id.to_hex()))
+}
+
 fn stored_managed_agent_auth_tag(auth_tag: Option<&str>) -> Option<String> {
     auth_tag
         .map(str::trim)
@@ -785,9 +796,9 @@ pub(crate) async fn send_managed_agent_channel_message_inner(
         ));
     }
     let submission_auth_tag =
-        managed_agent_submission_auth_tag(&record, &state, &keys.public_key())?;
+        managed_agent_submission_auth_tag(&record, state, &keys.public_key())?;
     let thread_ref = match parent_event_id.as_deref() {
-        Some(parent_id) => Some(resolve_thread_ref(parent_id, &state).await?),
+        Some(parent_id) => Some(resolve_thread_ref(parent_id, state).await?),
         None => None,
     };
 

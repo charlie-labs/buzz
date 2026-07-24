@@ -2007,20 +2007,7 @@ pub fn spawn_agent_child(
 
     // Stamp desktop ownership and an unpredictable harness-generation identity.
     let start_nonce = uuid::Uuid::new_v4().simple().to_string();
-    let daemon_control_token = uuid::Uuid::new_v4().simple().to_string();
-    let daemon_control_ready_file = super::managed_agents_base_dir(app)?
-        .join("control")
-        .join(format!("{}.json", runtime_key.runtime_id()));
-    if let Some(parent) = daemon_control_ready_file.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create daemon control dir: {error}"))?;
-    }
-    let _ = std::fs::remove_file(&daemon_control_ready_file);
-    command
-        .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
-        .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce)
-        .env("BUZZ_ACP_CONTROL_TOKEN", &daemon_control_token)
-        .env("BUZZ_ACP_CONTROL_READY_FILE", &daemon_control_ready_file);
+    let daemon_control = super::daemon_control(app, &runtime_key, &mut command, &start_nonce)?;
 
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
@@ -2085,8 +2072,8 @@ pub fn spawn_agent_child(
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
-        daemon_control_token,
-        daemon_control_ready_file,
+        daemon_control.token,
+        daemon_control.ready_file,
         &record.name,
     ));
     #[cfg(not(windows))]
@@ -2097,8 +2084,8 @@ pub fn spawn_agent_child(
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
         start_nonce,
-        daemon_control_token,
-        daemon_control_ready_file,
+        daemon_control_token: daemon_control.token,
+        daemon_control_ready_file: daemon_control.ready_file,
     })
 }
 

@@ -47,10 +47,14 @@ use huddle::{
     set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{
-    backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
-    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
-    restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
-    try_regenerate_nest, run_managed_daemon, cancel_managed_daemon,
+    backfill_persona_snapshots, cancel_managed_daemon, create_daemon_binding,
+    create_daemon_package, delete_daemon_binding, delete_daemon_package, ensure_nest,
+    export_daemon_package, get_daemon_binding, get_daemon_package, import_daemon_package,
+    list_daemon_bindings, list_daemon_packages, list_daemon_run_history,
+    list_managed_agent_runtimes, open_daemon_library_folder, put_managed_agent_runtime_lifecycle,
+    reconcile_managed_agent_runtimes, restart_managed_agent_runtime, run_managed_daemon,
+    start_managed_agent_runtime, stop_managed_agent_runtime, try_regenerate_nest,
+    update_daemon_binding,
 };
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
@@ -531,6 +535,9 @@ pub fn run() {
             }
 
             try_regenerate_nest(&app_handle);
+            if let Err(error) = managed_agents::recover_interrupted_runs(&app_handle) {
+                eprintln!("buzz-desktop: failed to reconcile daemon run history: {error}");
+            }
 
             // Sync team-dir edits and reconcile persona/team/agent events after
             // setup can continue. It is best-effort retention backfill, unlike
@@ -737,6 +744,19 @@ pub fn run() {
             search_messages,
             send_channel_message,
             send_managed_agent_channel_message,
+            list_daemon_packages,
+            get_daemon_package,
+            create_daemon_package,
+            import_daemon_package,
+            export_daemon_package,
+            delete_daemon_package,
+            open_daemon_library_folder,
+            list_daemon_bindings,
+            get_daemon_binding,
+            create_daemon_binding,
+            update_daemon_binding,
+            delete_daemon_binding,
+            list_daemon_run_history,
             run_managed_daemon,
             cancel_managed_daemon,
             has_managed_agent_channel_message_marker,

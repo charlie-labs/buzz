@@ -7,14 +7,13 @@ use std::{
     },
 };
 
+use crate::huddle::HuddleState;
+use crate::managed_agents::config_bridge::SessionConfigCache;
+use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, Manager};
 #[cfg(feature = "mesh-llm")]
 use tokio::sync::Mutex as AsyncMutex;
-
-use crate::huddle::HuddleState;
-use crate::managed_agents::config_bridge::SessionConfigCache;
-use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 pub struct AppState {
     pub keys: Mutex<Keys>,
     pub http_client: reqwest::Client,
@@ -40,14 +39,12 @@ pub struct AppState {
     pub managed_agent_profile_reconcile_enabled: AtomicBool,
     /// Shared shutdown signal checked by launch-time agent restoration.
     pub shutdown_started: AtomicBool,
-    /// Serializes every managed-runtime transition that changes the protected
-    /// PID set: spawn/register, adoption, stop, shutdown, and sweep snapshots.
+    /// Serializes protected PID transitions: spawn, adoption, stop, shutdown, and sweeps.
     /// Never perform network I/O while holding this lock.
     pub managed_agent_runtime_transition: Mutex<()>,
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
-    /// Active daemon activations, keyed by caller-provided run UUID.
     pub daemon_run_cancellations: Mutex<HashMap<uuid::Uuid, tokio_util::sync::CancellationToken>>,
     pub huddle_state: Mutex<HuddleState>,
     /// Tauri app handle — stored after setup so huddle commands can emit

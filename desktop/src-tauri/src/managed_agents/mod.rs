@@ -7,8 +7,9 @@ pub(crate) use agent_env::{
 };
 mod backend;
 pub(crate) mod config_bridge;
-mod discovery;
 mod daemon;
+mod daemon_library;
+mod discovery;
 mod env_vars;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
@@ -45,8 +46,9 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
 }
 
 pub use backend::*;
-pub use discovery::*;
 pub use daemon::*;
+pub use daemon_library::*;
+pub use discovery::*;
 pub use env_vars::*;
 #[cfg(windows)]
 pub(crate) use git_bash::git_bash_available;
