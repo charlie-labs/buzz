@@ -9,6 +9,7 @@ mod backend;
 pub(crate) mod config_bridge;
 mod daemon;
 mod daemon_library;
+mod daemon_runtime;
 mod discovery;
 mod env_vars;
 pub(crate) mod git_bash;
@@ -48,6 +49,7 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
 pub use backend::*;
 pub use daemon::*;
 pub use daemon_library::*;
+pub(crate) use daemon_runtime::*;
 pub use discovery::*;
 pub use env_vars::*;
 #[cfg(windows)]

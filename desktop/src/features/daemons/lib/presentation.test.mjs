@@ -18,6 +18,10 @@ test("presents activation and readiness in actionable language", () => {
     readinessLabel("invalid_context"),
     "Choose an available context folder",
   );
+  assert.equal(
+    readinessLabel("channel_unavailable"),
+    "Choose an available output channel",
+  );
 });
 
 test("distinguishes terminal daemon outcomes", () => {
@@ -26,6 +30,7 @@ test("distinguishes terminal daemon outcomes", () => {
     "Skipped: already running",
   );
   assert.equal(runStateLabel("terminal", "cancelled"), "Canceled");
+  assert.equal(runStateLabel("terminal", "no_op"), "No changes");
 });
 
 test("derives concise run durations", () => {

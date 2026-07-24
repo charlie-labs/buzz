@@ -26,6 +26,7 @@ export function readinessLabel(readiness: DaemonScheduleReadiness): string {
     invalid_schedule: "Fix the schedule in DAEMON.md",
     missing_agent: "Choose a managed agent",
     relay_mismatch: "Agent is connected to a different relay",
+    channel_unavailable: "Choose an available output channel",
     unsupported_runtime: "Choose a supported local agent",
     agent_not_ready: "Start or repair the managed agent",
     invalid_context: "Choose an available context folder",
@@ -47,6 +48,7 @@ export function runStateLabel(
   }
   return {
     succeeded: "Succeeded",
+    no_op: "No changes",
     failed: "Failed",
     cancelled: "Canceled",
     interrupted: "Interrupted",

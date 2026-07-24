@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use super::{
+    commands::{delete_binding_record, ensure_primary_binding_available},
     package::{
         copy_source_to_staging, load_package_directory, promote_package, safe_export,
         stage_package, stage_package_update, MAX_PACKAGE_DEPTH, MAX_PACKAGE_FILES,
@@ -265,6 +266,41 @@ fn update_context_distinguishes_omission_and_explicit_null() {
 }
 
 #[test]
+fn primary_binding_rejects_duplicate_daemon_but_allows_self_update() {
+    let existing = binding();
+    let error = ensure_primary_binding_available(
+        std::slice::from_ref(&existing),
+        &existing.daemon_id,
+        None,
+    )
+    .unwrap_err();
+    assert!(error.contains("already has primary binding"));
+    assert!(error.contains("update or delete"));
+    assert!(ensure_primary_binding_available(
+        std::slice::from_ref(&existing),
+        &existing.daemon_id,
+        Some(&existing.id),
+    )
+    .is_ok());
+}
+
+#[test]
+fn binding_deletion_refuses_legacy_duplicate_ids_without_deleting_anything() {
+    let first = binding();
+    let mut duplicate = first.clone();
+    duplicate.daemon_id = "legacy-duplicate".into();
+    let mut bindings = vec![first.clone(), duplicate];
+    let error = delete_binding_record(&mut bindings, &first.id).unwrap_err();
+    assert!(error.contains("2 records"));
+    assert!(error.contains("no records were deleted"));
+    assert_eq!(bindings.len(), 2);
+
+    bindings[1].id = Uuid::new_v4().to_string();
+    delete_binding_record(&mut bindings, &first.id).unwrap();
+    assert_eq!(bindings.len(), 1);
+}
+
+#[test]
 fn durable_run_reservation_is_idempotent_and_conflict_safe() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("run.json");
@@ -310,6 +346,42 @@ fn durable_run_reservation_is_idempotent_and_conflict_safe() {
     )
     .unwrap_err()
     .contains("conflicts"));
+}
+
+#[test]
+fn no_op_terminal_receipt_serializes_without_publication_state() {
+    assert_eq!(
+        serde_json::to_value(DaemonRunStatus::NoOp).unwrap(),
+        serde_json::json!("no_op")
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("run.json");
+    let binding = binding();
+    let run_id = Uuid::new_v4().to_string();
+    let Reservation::New(mut record) = reserve_run_at_path(
+        &path,
+        &run_id,
+        &binding,
+        "package-hash",
+        "wake",
+        DaemonRunTrigger::Manual,
+        None,
+    )
+    .unwrap()
+    else {
+        panic!("expected new reservation")
+    };
+    record.lifecycle = DaemonRunLifecycle::Terminal;
+    record.status = Some(DaemonRunStatus::NoOp);
+    record.acp_session_id = Some("session-1".into());
+    record.completed_at = Some("2026-07-24T00:01:00Z".into());
+    write_run_path(&path, &record).unwrap();
+
+    let stored = read_run_path(&path).unwrap().unwrap();
+    assert_eq!(stored.status, Some(DaemonRunStatus::NoOp));
+    assert_eq!(stored.acp_session_id.as_deref(), Some("session-1"));
+    assert!(stored.output_event_id.is_none());
+    assert!(stored.publishing_at.is_none());
 }
 
 #[test]

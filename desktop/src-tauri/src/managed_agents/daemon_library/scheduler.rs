@@ -55,7 +55,8 @@ struct DueOccurrences {
 pub(crate) fn start_daemon_scheduler(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let mut slot = state
-        .daemon_scheduler
+        .daemon_runtime
+        .scheduler
         .lock()
         .map_err(|error| error.to_string())?;
     if slot.is_some() {
@@ -98,7 +99,8 @@ pub(crate) fn start_daemon_scheduler(app: &AppHandle) -> Result<(), String> {
 pub(crate) fn stop_daemon_scheduler(app: &AppHandle) {
     let runtime = app
         .state::<AppState>()
-        .daemon_scheduler
+        .daemon_runtime
+        .scheduler
         .lock()
         .ok()
         .and_then(|mut slot| slot.take());

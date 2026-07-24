@@ -3,7 +3,7 @@ use rmcp::{
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router, ErrorData, ServerHandler,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
@@ -16,10 +16,21 @@ pub(crate) struct DaemonCompletionMcp {
     tool_router: ToolRouter<Self>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CompletionOutcome {
+    #[default]
+    Succeeded,
+    NoOp,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct CompleteParams {
-    /// Final markdown to publish as the managed agent's daemon result.
-    markdown: String,
+    /// Terminal outcome. Omit for succeeded; use no_op only when there is no user-visible work.
+    #[serde(default)]
+    outcome: CompletionOutcome,
+    /// Final markdown to publish. Required for succeeded; optional for no_op.
+    markdown: Option<String>,
 }
 
 #[tool_router]
@@ -36,15 +47,19 @@ impl DaemonCompletionMcp {
 
     #[tool(
         name = "daemon_complete",
-        description = "Complete this daemon activation exactly once. Supply the final markdown payload that Buzz should publish."
+        description = "Complete this daemon activation exactly once. Omit outcome (or use succeeded) with non-empty markdown to publish. Use no_op without markdown only when there is no user-visible result."
     )]
     async fn complete(
         &self,
         Parameters(params): Parameters<CompleteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if params.markdown.trim().is_empty() || params.markdown.len() > MAX_OUTPUT_BYTES {
+        let markdown = params.markdown.unwrap_or_default();
+        if markdown.len() > MAX_OUTPUT_BYTES
+            || (matches!(params.outcome, CompletionOutcome::Succeeded)
+                && markdown.trim().is_empty())
+        {
             return Ok(CallToolResult::error(vec![Content::text(
-                "markdown must be non-empty and at most 128 KiB",
+                "markdown must be non-empty for succeeded and at most 128 KiB",
             )]));
         }
         let response = self
@@ -53,7 +68,8 @@ impl DaemonCompletionMcp {
             .json(&serde_json::json!({
                 "runId": self.run_id,
                 "callbackToken": self.callback_token,
-                "markdown": params.markdown,
+                "outcome": params.outcome,
+                "markdown": markdown,
             }))
             .send()
             .await
@@ -78,6 +94,39 @@ impl ServerHandler for DaemonCompletionMcp {
                 "buzz-daemon-completion",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions("Call daemon_complete exactly once before ending the turn.")
+            .with_instructions("Call daemon_complete exactly once before ending the turn. Use no_op only after confirming there is no user-visible result to publish.")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CompleteParams, CompletionOutcome};
+
+    #[test]
+    fn completion_params_preserve_legacy_success_and_accept_no_op() {
+        let legacy: CompleteParams = serde_json::from_value(serde_json::json!({
+            "markdown": "# Done"
+        }))
+        .unwrap();
+        assert!(matches!(legacy.outcome, CompletionOutcome::Succeeded));
+
+        let explicit: CompleteParams = serde_json::from_value(serde_json::json!({
+            "outcome": "succeeded",
+            "markdown": "# Done"
+        }))
+        .unwrap();
+        assert!(matches!(explicit.outcome, CompletionOutcome::Succeeded));
+
+        let no_op: CompleteParams = serde_json::from_value(serde_json::json!({
+            "outcome": "no_op"
+        }))
+        .unwrap();
+        assert!(matches!(no_op.outcome, CompletionOutcome::NoOp));
+        assert!(no_op.markdown.is_none());
+
+        assert!(serde_json::from_value::<CompleteParams>(serde_json::json!({
+            "outcome": "unknown"
+        }))
+        .is_err());
     }
 }

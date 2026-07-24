@@ -9,6 +9,7 @@ export type DaemonRunLifecycle =
   | "terminal";
 export type DaemonRunStatus =
   | "succeeded"
+  | "no_op"
   | "failed"
   | "cancelled"
   | "interrupted"
@@ -23,6 +24,7 @@ export type DaemonScheduleReadiness =
   | "invalid_schedule"
   | "missing_agent"
   | "relay_mismatch"
+  | "channel_unavailable"
   | "unsupported_runtime"
   | "agent_not_ready"
   | "invalid_context";

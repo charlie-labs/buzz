@@ -9,9 +9,7 @@ use std::{
 
 use crate::huddle::HuddleState;
 use crate::managed_agents::config_bridge::SessionConfigCache;
-use crate::managed_agents::{
-    DaemonSchedulerRuntime, ManagedAgentPairRuntime, ManagedAgentRuntimeKey,
-};
+use crate::managed_agents::{DaemonRuntimeState, ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, Manager};
 #[cfg(feature = "mesh-llm")]
@@ -47,9 +45,7 @@ pub struct AppState {
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
-    pub daemon_run_cancellations: Mutex<HashMap<uuid::Uuid, tokio_util::sync::CancellationToken>>,
-    /// App-lifetime UTC daemon scheduler. Presence guarantees setup starts it once.
-    pub daemon_scheduler: Mutex<Option<DaemonSchedulerRuntime>>,
+    pub daemon_runtime: DaemonRuntimeState,
     pub huddle_state: Mutex<HuddleState>,
     /// Tauri app handle — stored after setup so huddle commands can emit
     /// `huddle-state-changed` events without needing the handle threaded
@@ -212,8 +208,7 @@ pub fn build_app_state() -> AppState {
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
-        daemon_run_cancellations: Mutex::new(HashMap::new()),
-        daemon_scheduler: Mutex::new(None),
+        daemon_runtime: DaemonRuntimeState::default(),
         session_config_cache: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
         app_handle: Mutex::new(None),

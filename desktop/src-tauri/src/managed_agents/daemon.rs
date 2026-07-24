@@ -19,7 +19,8 @@ use super::{
 use crate::{
     app_state::AppState,
     commands::{
-        managed_agent_channel_message_event_id_by_marker, send_managed_agent_channel_message_inner,
+        managed_agent_channel_message_event_id_by_marker, managed_agent_submission_auth_tag,
+        send_managed_agent_channel_message_inner,
     },
 };
 
@@ -153,7 +154,8 @@ pub async fn run_managed_daemon(
     let cancellation = CancellationToken::new();
     {
         let mut active = state
-            .daemon_run_cancellations
+            .daemon_runtime
+            .cancellations
             .lock()
             .map_err(|error| error.to_string())?;
         if active.contains_key(&run_id) {
@@ -182,7 +184,7 @@ pub async fn run_managed_daemon(
         cancellation,
     )
     .await;
-    if let Ok(mut active) = state.daemon_run_cancellations.lock() {
+    if let Ok(mut active) = state.daemon_runtime.cancellations.lock() {
         active.remove(&run_id);
     }
     result
@@ -207,6 +209,22 @@ async fn run_managed_daemon_inner(
             state,
             record,
             DaemonRunStatus::Failed,
+            None,
+            Some(&error),
+        )?;
+        return Ok(record.clone());
+    }
+    if let Err(error) = validate_daemon_output_channel(app, binding).await {
+        let status = if record.trigger == super::DaemonRunTrigger::Schedule {
+            DaemonRunStatus::SkippedUnready
+        } else {
+            DaemonRunStatus::Failed
+        };
+        terminalize_safely(
+            app,
+            state,
+            record,
+            status,
             None,
             Some(&error),
         )?;
@@ -348,30 +366,30 @@ async fn run_managed_daemon_inner(
         )?;
         return Ok(record.clone());
     }
-    if response.status != "succeeded" {
-        terminalize_safely(
-            app,
-            state,
-            record,
-            DaemonRunStatus::Failed,
-            response.session_id,
-            response
-                .diagnostic
-                .as_deref()
-                .or(Some("daemon execution failed")),
-        )?;
-        return Ok(record.clone());
-    }
-    let Some(output) = response.output_markdown else {
-        terminalize_safely(
-            app,
-            state,
-            record,
-            DaemonRunStatus::Failed,
-            response.session_id,
-            Some("successful daemon response omitted output"),
-        )?;
-        return Ok(record.clone());
+    let output = match classify_control_completion(&response.status, response.output_markdown) {
+        Ok(None) => {
+            terminalize_safely(
+                app,
+                state,
+                record,
+                DaemonRunStatus::NoOp,
+                response.session_id,
+                None,
+            )?;
+            return Ok(record.clone());
+        }
+        Ok(Some(output)) => output,
+        Err(error) => {
+            terminalize_safely(
+                app,
+                state,
+                record,
+                DaemonRunStatus::Failed,
+                response.session_id,
+                response.diagnostic.as_deref().or(Some(error)),
+            )?;
+            return Ok(record.clone());
+        }
     };
 
     {
@@ -429,7 +447,8 @@ pub fn cancel_managed_daemon(run_id: String, app: AppHandle) -> Result<(), Strin
     let run_id = Uuid::parse_str(run_id.trim()).map_err(|_| "invalid run UUID")?;
     let state = app.state::<AppState>();
     let active = state
-        .daemon_run_cancellations
+        .daemon_runtime
+        .cancellations
         .lock()
         .map_err(|error| error.to_string())?;
     let cancellation = active.get(&run_id).ok_or("daemon run is not active")?;
@@ -438,7 +457,12 @@ pub fn cancel_managed_daemon(run_id: String, app: AppHandle) -> Result<(), Strin
 }
 
 pub(crate) fn cancel_all_daemon_runs(app: &AppHandle) {
-    if let Ok(active) = app.state::<AppState>().daemon_run_cancellations.lock() {
+    if let Ok(active) = app
+        .state::<AppState>()
+        .daemon_runtime
+        .cancellations
+        .lock()
+    {
         for cancellation in active.values() {
             cancellation.cancel();
         }
@@ -450,6 +474,7 @@ pub(crate) fn daemon_binding_readiness(
     binding: &super::DaemonBinding,
 ) -> Result<(), (super::DaemonScheduleReadiness, Option<String>)> {
     let result = (|| {
+        validate_daemon_output_channel_scope(app.state::<AppState>().inner(), binding)?;
         let records = load_managed_agents(app)?;
         let record = records
             .iter()
@@ -461,7 +486,9 @@ pub(crate) fn daemon_binding_readiness(
         resolve_ready_agent_record(app, record)
     })();
     result.map_err(|error| {
-        let readiness = if error.contains("not found") {
+        let readiness = if error.contains("output channel") || error.contains("channel UUID") {
+            super::DaemonScheduleReadiness::ChannelUnavailable
+        } else if error.contains("not found") {
             super::DaemonScheduleReadiness::MissingAgent
         } else if error.contains("relay") {
             super::DaemonScheduleReadiness::RelayMismatch
@@ -472,6 +499,98 @@ pub(crate) fn daemon_binding_readiness(
         };
         (readiness, Some(error))
     })
+}
+
+fn validate_daemon_output_channel_scope(
+    state: &AppState,
+    binding: &super::DaemonBinding,
+) -> Result<(), String> {
+    Uuid::parse_str(&binding.channel_id).map_err(|_| "invalid output channel UUID".to_string())?;
+    let active = ManagedAgentRuntimeKey::new(
+        binding.agent_pubkey.clone(),
+        &crate::relay::relay_ws_url_with_override(state),
+    )?;
+    let configured = ManagedAgentRuntimeKey::new(
+        binding.agent_pubkey.clone(),
+        &binding.relay_url,
+    )?;
+    if active.relay_url != configured.relay_url {
+        return Err(
+            "output channel belongs to a different relay; choose a channel in the active community"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn validate_daemon_output_channel(
+    app: &AppHandle,
+    binding: &super::DaemonBinding,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    validate_daemon_output_channel_scope(&state, binding)?;
+    let record = load_managed_agents(app)?
+        .into_iter()
+        .find(|record| record.pubkey.eq_ignore_ascii_case(&binding.agent_pubkey))
+        .ok_or_else(|| "managed agent not found".to_string())?;
+    let keys = nostr::Keys::parse(record.private_key_nsec.trim())
+        .map_err(|error| format!("failed to parse managed agent key: {error}"))?;
+    if !keys
+        .public_key()
+        .to_hex()
+        .eq_ignore_ascii_case(&binding.agent_pubkey)
+    {
+        return Err("managed agent key does not match the binding identity".into());
+    }
+    let auth_tag = managed_agent_submission_auth_tag(&record, &state, &keys.public_key())?;
+    let events = crate::relay::query_relay_at_with_keys(
+        &state,
+        &crate::relay::relay_api_base_url_with_override(&state),
+        &[
+            serde_json::json!({"kinds": [39000], "#d": [&binding.channel_id], "limit": 1}),
+            serde_json::json!({"kinds": [39002], "#d": [&binding.channel_id], "limit": 1}),
+        ],
+        &keys,
+        auth_tag.as_deref(),
+    )
+    .await
+    .map_err(|error| format!("could not validate output channel readiness: {error}"))?;
+    validate_daemon_output_channel_events(&events, &binding.agent_pubkey)
+}
+
+fn validate_daemon_output_channel_events(
+    events: &[nostr::Event],
+    agent_pubkey: &str,
+) -> Result<(), String> {
+    let metadata = events
+        .iter()
+        .find(|event| event.kind.as_u16() == 39000)
+        .ok_or_else(|| {
+            "output channel is unavailable on the active relay; choose an existing channel"
+                .to_string()
+        })?;
+    let channel = crate::nostr_convert::channel_info_from_event(metadata, None, None)
+        .map_err(|error| format!("output channel metadata is invalid: {error}"))?;
+    if channel.visibility == "open" {
+        return Ok(());
+    }
+    let members = events
+        .iter()
+        .find(|event| event.kind.as_u16() == 39002)
+        .ok_or_else(|| "output channel membership is unavailable for the managed agent".to_string())?;
+    let membership = crate::nostr_convert::channel_members_from_event(members)
+        .map_err(|error| format!("output channel membership is invalid: {error}"))?;
+    if !membership
+        .members
+        .iter()
+        .any(|member| member.pubkey.eq_ignore_ascii_case(agent_pubkey))
+    {
+        return Err(
+            "managed agent is not a member of the private output channel; add it before running the daemon"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn resolve_ready_agent_record(
@@ -592,6 +711,20 @@ fn daemon_run_marker(run_id: Uuid) -> String {
     format!("daemon-run:{run_id}")
 }
 
+fn classify_control_completion(
+    status: &str,
+    output_markdown: Option<String>,
+) -> Result<Option<String>, &'static str> {
+    match status {
+        "no_op" => Ok(None),
+        "succeeded" => output_markdown
+            .filter(|output| !output.trim().is_empty())
+            .map(Some)
+            .ok_or("successful daemon response omitted output"),
+        _ => Err("daemon execution failed"),
+    }
+}
+
 fn validate_scheduled_occurrence(value: &str, now: DateTime<Utc>) -> Result<(), String> {
     let parsed = DateTime::parse_from_rfc3339(value)
         .map_err(|error| format!("invalid scheduled UTC occurrence: {error}"))?;
@@ -617,6 +750,17 @@ fn safe_diagnostic(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn channel_event(kind: u16, tags: Vec<Vec<String>>) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(kind), "")
+            .tags(
+                tags.into_iter()
+                    .map(|tag| Tag::parse(tag).expect("valid channel tag")),
+            )
+            .sign_with_keys(&Keys::generate())
+            .expect("sign channel event")
+    }
 
     #[test]
     fn request_rejects_removed_renderer_paths_and_camel_case_is_stable() {
@@ -638,6 +782,57 @@ mod tests {
     fn publication_marker_is_stable() {
         let run_id = Uuid::new_v4();
         assert_eq!(daemon_run_marker(run_id), format!("daemon-run:{run_id}"));
+    }
+
+    #[test]
+    fn control_completion_no_op_has_no_publication_payload() {
+        assert_eq!(classify_control_completion("no_op", None).unwrap(), None);
+        assert_eq!(
+            classify_control_completion("succeeded", Some("# Done".into())).unwrap(),
+            Some("# Done".into())
+        );
+        assert!(classify_control_completion("succeeded", None).is_err());
+        assert!(classify_control_completion("unknown", None).is_err());
+    }
+
+    #[test]
+    fn output_channel_events_reject_unknown_and_accept_open_channel() {
+        let channel_id = Uuid::new_v4().to_string();
+        let agent_pubkey = "aa".repeat(32);
+        let error = validate_daemon_output_channel_events(&[], &agent_pubkey).unwrap_err();
+        assert!(error.contains("unavailable"));
+
+        let metadata = channel_event(
+            39000,
+            vec![
+                vec!["d".into(), channel_id],
+                vec!["visibility".into(), "open".into()],
+            ],
+        );
+        assert!(validate_daemon_output_channel_events(&[metadata], &agent_pubkey).is_ok());
+    }
+
+    #[test]
+    fn output_channel_scope_rejects_stale_relay_and_accepts_active_relay() {
+        let state = crate::app_state::build_app_state();
+        *state.relay_url_override.lock().unwrap() = Some("wss://active.example".into());
+        let mut binding = super::super::DaemonBinding {
+            id: Uuid::new_v4().to_string(),
+            daemon_id: "safe".into(),
+            agent_pubkey: "aa".repeat(32),
+            relay_url: "wss://stale.example".into(),
+            channel_id: Uuid::new_v4().to_string(),
+            context_directory: None,
+            context_configured: false,
+            schedule_enabled: false,
+            created_at: "2026-07-24T00:00:00Z".into(),
+            updated_at: "2026-07-24T00:00:00Z".into(),
+        };
+        assert!(validate_daemon_output_channel_scope(&state, &binding)
+            .unwrap_err()
+            .contains("different relay"));
+        binding.relay_url = "wss://active.example".into();
+        assert!(validate_daemon_output_channel_scope(&state, &binding).is_ok());
     }
 
     #[test]

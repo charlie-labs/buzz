@@ -180,12 +180,18 @@ pub fn delete_daemon_package(daemon_id: String, app: AppHandle) -> Result<(), St
         .map_err(|error| error.to_string())?;
     let daemon_id = daemon_id.trim();
     let package = super::load_managed_package(&app, daemon_id)?;
-    if BindingStore::load(&app)?
+    let binding_ids = BindingStore::load(&app)?
         .bindings
-        .iter()
-        .any(|binding| binding.daemon_id == daemon_id)
-    {
-        return Err("remove daemon bindings before deleting the package".into());
+        .into_iter()
+        .filter(|binding| binding.daemon_id == daemon_id)
+        .map(|binding| binding.id)
+        .collect::<Vec<_>>();
+    if !binding_ids.is_empty() {
+        return Err(format!(
+            "remove all {} daemon binding record(s) before deleting the package (binding IDs: {})",
+            binding_ids.len(),
+            binding_ids.join(", ")
+        ));
     }
     std::fs::remove_dir_all(package.directory).map_err(|error| error.to_string())
 }
@@ -227,15 +233,10 @@ pub fn get_daemon_schedule_status(
 }
 
 #[tauri::command]
-pub fn create_daemon_binding(
+pub async fn create_daemon_binding(
     request: CreateDaemonBindingRequest,
     app: AppHandle,
 ) -> Result<DaemonBindingSummary, String> {
-    let state = app.state::<AppState>();
-    let _guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
     super::load_managed_package(&app, request.daemon_id.trim())?;
     let key = ManagedAgentRuntimeKey::new(request.agent_pubkey, &request.relay_url)?;
     validate_managed_agent_relationship(&app, &key.pubkey, &key.relay_url)?;
@@ -256,28 +257,40 @@ pub fn create_daemon_binding(
         created_at: now.clone(),
         updated_at: now,
     };
+    crate::managed_agents::validate_daemon_output_channel(&app, &binding).await?;
+    let state = app.state::<AppState>();
+    let _guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    super::load_managed_package(&app, &binding.daemon_id)?;
+    validate_managed_agent_relationship(&app, &binding.agent_pubkey, &binding.relay_url)?;
     let mut store = BindingStore::load(&app)?;
+    ensure_primary_binding_available(&store.bindings, &binding.daemon_id, None)?;
+    ensure_binding_id_available(&store.bindings, &binding.id)?;
     store.bindings.push(binding.clone());
     store.save(&app)?;
     Ok((&binding).into())
 }
 
 #[tauri::command]
-pub fn update_daemon_binding(
+pub async fn update_daemon_binding(
     request: UpdateDaemonBindingRequest,
     app: AppHandle,
 ) -> Result<DaemonBindingSummary, String> {
     let state = app.state::<AppState>();
-    let _guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut store = BindingStore::load(&app)?;
-    let binding = store
-        .bindings
-        .iter_mut()
-        .find(|binding| binding.id == request.id)
-        .ok_or("daemon binding not found")?;
+    let (original, mut binding) = {
+        let _guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let binding = BindingStore::load(&app)?
+            .bindings
+            .into_iter()
+            .find(|binding| binding.id == request.id)
+            .ok_or("daemon binding not found")?;
+        (binding.clone(), binding)
+    };
     if let Some(daemon_id) = request.daemon_id {
         super::load_managed_package(&app, daemon_id.trim())?;
         binding.daemon_id = daemon_id.trim().to_string();
@@ -306,9 +319,25 @@ pub fn update_daemon_binding(
         binding.schedule_enabled = enabled;
     }
     binding.updated_at = crate::util::now_iso();
-    let result = binding.clone();
+    crate::managed_agents::validate_daemon_output_channel(&app, &binding).await?;
+
+    let _guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut store = BindingStore::load(&app)?;
+    let index = store
+        .bindings
+        .iter()
+        .position(|candidate| candidate.id == binding.id)
+        .ok_or("daemon binding not found")?;
+    if store.bindings[index] != original {
+        return Err("daemon binding changed while validating; reload and retry the update".into());
+    }
+    ensure_primary_binding_available(&store.bindings, &binding.daemon_id, Some(&binding.id))?;
+    store.bindings[index] = binding.clone();
     store.save(&app)?;
-    Ok((&result).into())
+    Ok((&binding).into())
 }
 
 #[tauri::command]
@@ -319,14 +348,51 @@ pub fn delete_daemon_binding(binding_id: String, app: AppHandle) -> Result<(), S
         .lock()
         .map_err(|error| error.to_string())?;
     let mut store = BindingStore::load(&app)?;
-    let previous = store.bindings.len();
-    store
-        .bindings
-        .retain(|binding| binding.id != binding_id.trim());
-    if store.bindings.len() == previous {
-        return Err("daemon binding not found".into());
-    }
+    delete_binding_record(&mut store.bindings, binding_id.trim())?;
     store.save(&app)
+}
+
+pub(crate) fn ensure_primary_binding_available(
+    bindings: &[DaemonBinding],
+    daemon_id: &str,
+    exclude_binding_id: Option<&str>,
+) -> Result<(), String> {
+    if let Some(existing) = bindings.iter().find(|binding| {
+        binding.daemon_id == daemon_id && exclude_binding_id != Some(binding.id.as_str())
+    }) {
+        return Err(format!(
+            "daemon {daemon_id} already has primary binding {}; update or delete that binding instead of creating another",
+            existing.id
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_binding_id_available(bindings: &[DaemonBinding], binding_id: &str) -> Result<(), String> {
+    if bindings.iter().any(|binding| binding.id == binding_id) {
+        return Err("daemon binding ID already exists; retry creation".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_binding_record(
+    bindings: &mut Vec<DaemonBinding>,
+    binding_id: &str,
+) -> Result<(), String> {
+    let matches = bindings
+        .iter()
+        .filter(|binding| binding.id == binding_id)
+        .count();
+    match matches {
+        0 => Err("daemon binding not found".into()),
+        1 => {
+            bindings.retain(|binding| binding.id != binding_id);
+            Ok(())
+        }
+        count => Err(format!(
+            "daemon binding store contains {count} records with ID {binding_id}; no records were deleted. Repair the duplicate IDs, then retry deletion"
+        )),
+    }
 }
 
 #[tauri::command]

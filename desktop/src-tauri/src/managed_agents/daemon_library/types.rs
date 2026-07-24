@@ -191,6 +191,7 @@ pub enum DaemonRunLifecycle {
 #[serde(rename_all = "snake_case")]
 pub enum DaemonRunStatus {
     Succeeded,
+    NoOp,
     Failed,
     Cancelled,
     Interrupted,
@@ -209,6 +210,7 @@ pub enum DaemonScheduleReadiness {
     InvalidSchedule,
     MissingAgent,
     RelayMismatch,
+    ChannelUnavailable,
     UnsupportedRuntime,
     AgentNotReady,
     InvalidContext,

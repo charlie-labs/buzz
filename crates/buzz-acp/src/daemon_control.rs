@@ -46,7 +46,7 @@ struct ControlState {
 struct ActiveRun {
     cancel: CancellationToken,
     callback_token: String,
-    completion: Arc<Mutex<Option<String>>>,
+    completion: Arc<Mutex<Option<DaemonCompletion>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,7 +75,24 @@ pub(crate) struct DaemonRunResponse {
 struct CompletionRequest {
     run_id: Uuid,
     callback_token: String,
-    markdown: String,
+    #[serde(default)]
+    outcome: CompletionOutcome,
+    #[serde(default)]
+    markdown: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CompletionOutcome {
+    #[default]
+    Succeeded,
+    NoOp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonCompletion {
+    outcome: CompletionOutcome,
+    markdown: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,7 +211,12 @@ async fn complete(
     State(state): State<ControlState>,
     Json(request): Json<CompletionRequest>,
 ) -> Response {
-    if request.markdown.trim().is_empty() || request.markdown.len() > MAX_OUTPUT_BYTES {
+    let markdown = request.markdown.filter(|value| !value.trim().is_empty());
+    if markdown
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_OUTPUT_BYTES)
+        || (request.outcome == CompletionOutcome::Succeeded && markdown.is_none())
+    {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let active = state.active.lock().await;
@@ -208,7 +230,10 @@ async fn complete(
     if completion.is_some() {
         return StatusCode::CONFLICT.into_response();
     }
-    *completion = Some(request.markdown);
+    *completion = Some(DaemonCompletion {
+        outcome: request.outcome,
+        markdown,
+    });
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -246,7 +271,7 @@ async fn execute_inner(
     cwd: &std::path::Path,
     callback_token: &str,
     cancel: CancellationToken,
-    completion: &Arc<Mutex<Option<String>>>,
+    completion: &Arc<Mutex<Option<DaemonCompletion>>>,
 ) -> DaemonRunResponse {
     let spawn = AcpClient::spawn(
         &state.executor.command,
@@ -315,7 +340,7 @@ async fn execute_inner(
     };
 
     let prompt = format!(
-        "{}\n\nBefore ending, call the daemon_complete tool exactly once with the final markdown payload. Do not publish directly to Buzz.",
+        "{}\n\nBefore ending, call daemon_complete exactly once. Use succeeded with final markdown when there is user-visible work. Use no_op without markdown only when there is nothing to publish. Do not publish directly to Buzz.",
         request.wake_instruction.trim()
     );
     let result = tokio::select! {
@@ -354,7 +379,7 @@ fn terminal_response(
     run_id: Uuid,
     session_id: String,
     reason: StopReason,
-    completion: Option<String>,
+    completion: Option<DaemonCompletion>,
 ) -> DaemonRunResponse {
     match (reason, completion) {
         (StopReason::Cancelled, _) => DaemonRunResponse {
@@ -364,11 +389,30 @@ fn terminal_response(
             output_markdown: None,
             diagnostic: None,
         },
-        (StopReason::EndTurn, Some(output)) => DaemonRunResponse {
+        (
+            StopReason::EndTurn,
+            Some(DaemonCompletion {
+                outcome: CompletionOutcome::Succeeded,
+                markdown: Some(output),
+            }),
+        ) => DaemonRunResponse {
             run_id,
             session_id: Some(session_id),
             status: "succeeded",
             output_markdown: Some(output),
+            diagnostic: None,
+        },
+        (
+            StopReason::EndTurn,
+            Some(DaemonCompletion {
+                outcome: CompletionOutcome::NoOp,
+                ..
+            }),
+        ) => DaemonRunResponse {
+            run_id,
+            session_id: Some(session_id),
+            status: "no_op",
+            output_markdown: None,
             diagnostic: None,
         },
         (StopReason::EndTurn, None) => failed(
@@ -530,7 +574,10 @@ mod tests {
             run_id,
             "session".into(),
             StopReason::EndTurn,
-            Some("# Done".into()),
+            Some(DaemonCompletion {
+                outcome: CompletionOutcome::Succeeded,
+                markdown: Some("# Done".into()),
+            }),
         );
         assert_eq!(success.status, "succeeded");
         assert_eq!(success.output_markdown.as_deref(), Some("# Done"));
@@ -546,10 +593,55 @@ mod tests {
             run_id,
             "session".into(),
             StopReason::Cancelled,
-            Some("ignored".into()),
+            Some(DaemonCompletion {
+                outcome: CompletionOutcome::Succeeded,
+                markdown: Some("ignored".into()),
+            }),
         );
         assert_eq!(cancelled.status, "cancelled");
         assert!(cancelled.output_markdown.is_none());
+
+        let no_op = terminal_response(
+            run_id,
+            "session".into(),
+            StopReason::EndTurn,
+            Some(DaemonCompletion {
+                outcome: CompletionOutcome::NoOp,
+                markdown: None,
+            }),
+        );
+        assert_eq!(no_op.status, "no_op");
+        assert!(no_op.output_markdown.is_none());
+    }
+
+    #[test]
+    fn completion_request_wire_contract_defaults_success_and_rejects_unknown_outcomes() {
+        let run_id = Uuid::new_v4();
+        let legacy: CompletionRequest = serde_json::from_value(serde_json::json!({
+            "runId": run_id,
+            "callbackToken": "token",
+            "markdown": "# Done"
+        }))
+        .unwrap();
+        assert_eq!(legacy.outcome, CompletionOutcome::Succeeded);
+
+        let explicit: CompletionRequest = serde_json::from_value(serde_json::json!({
+            "runId": run_id,
+            "callbackToken": "token",
+            "outcome": "succeeded",
+            "markdown": "# Done"
+        }))
+        .unwrap();
+        assert_eq!(explicit.outcome, CompletionOutcome::Succeeded);
+
+        assert!(
+            serde_json::from_value::<CompletionRequest>(serde_json::json!({
+                "runId": run_id,
+                "callbackToken": "token",
+                "outcome": "unknown"
+            }))
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -561,7 +653,8 @@ mod tests {
             Json(CompletionRequest {
                 run_id,
                 callback_token: "wrong".into(),
-                markdown: "# Done".into(),
+                outcome: CompletionOutcome::Succeeded,
+                markdown: Some("# Done".into()),
             }),
         )
         .await;
@@ -572,7 +665,8 @@ mod tests {
             Json(CompletionRequest {
                 run_id,
                 callback_token: "callback-secret".into(),
-                markdown: "# Done".into(),
+                outcome: CompletionOutcome::Succeeded,
+                markdown: Some("# Done".into()),
             }),
         )
         .await;
@@ -583,10 +677,40 @@ mod tests {
             Json(CompletionRequest {
                 run_id,
                 callback_token: "callback-secret".into(),
-                markdown: "# Again".into(),
+                outcome: CompletionOutcome::Succeeded,
+                markdown: Some("# Again".into()),
             }),
         )
         .await;
         assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn completion_callback_accepts_no_op_and_rejects_success_without_markdown() {
+        let no_op_run = Uuid::new_v4();
+        let no_op = complete(
+            State(test_state(no_op_run, "callback-secret")),
+            Json(CompletionRequest {
+                run_id: no_op_run,
+                callback_token: "callback-secret".into(),
+                outcome: CompletionOutcome::NoOp,
+                markdown: None,
+            }),
+        )
+        .await;
+        assert_eq!(no_op.status(), StatusCode::NO_CONTENT);
+
+        let invalid_run = Uuid::new_v4();
+        let invalid = complete(
+            State(test_state(invalid_run, "callback-secret")),
+            Json(CompletionRequest {
+                run_id: invalid_run,
+                callback_token: "callback-secret".into(),
+                outcome: CompletionOutcome::Succeeded,
+                markdown: None,
+            }),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     }
 }
