@@ -65,14 +65,20 @@ pub(crate) fn reserve_run(
     package_hash: &str,
     wake_instruction: &str,
     trigger: DaemonRunTrigger,
+    scheduled_for_utc: Option<&str>,
 ) -> Result<Reservation, String> {
+    let path = run_path(app, run_id)?;
+    if read_run_path(&path)?.is_none() && binding_has_active_run(app, &binding.id)? {
+        return Err("daemon binding already has an active run".into());
+    }
     reserve_run_at_path(
-        &run_path(app, run_id)?,
+        &path,
         run_id,
         binding,
         package_hash,
         wake_instruction,
         trigger,
+        scheduled_for_utc,
     )
 }
 
@@ -83,10 +89,17 @@ pub(super) fn reserve_run_at_path(
     package_hash: &str,
     wake_instruction: &str,
     trigger: DaemonRunTrigger,
+    scheduled_for_utc: Option<&str>,
 ) -> Result<Reservation, String> {
     let wake_hash = sha256(wake_instruction.as_bytes());
     let snapshot = DaemonBindingSnapshot::from(binding);
-    let fingerprint = immutable_fingerprint(&snapshot, package_hash, &wake_hash, &trigger)?;
+    let fingerprint = immutable_fingerprint(
+        &snapshot,
+        package_hash,
+        &wake_hash,
+        &trigger,
+        scheduled_for_utc,
+    )?;
     if let Some(existing) = read_run_path(path)? {
         if existing.fingerprint != fingerprint {
             return Err("run UUID conflicts with a different immutable daemon request".into());
@@ -109,6 +122,7 @@ pub(super) fn reserve_run_at_path(
         wake_hash,
         binding: snapshot,
         trigger,
+        scheduled_for_utc: scheduled_for_utc.map(str::to_string),
         lifecycle: DaemonRunLifecycle::Reserved,
         status: None,
         reserved_at: crate::util::now_iso(),
@@ -121,6 +135,73 @@ pub(super) fn reserve_run_at_path(
     };
     write_run_path(path, &record)?;
     Ok(Reservation::New(record))
+}
+
+pub(crate) fn record_scheduler_receipt(
+    app: &AppHandle,
+    run_id: &str,
+    binding: &DaemonBinding,
+    package_hash: Option<&str>,
+    scheduled_for_utc: &str,
+    status: DaemonRunStatus,
+    diagnostic: &str,
+) -> Result<DaemonRunRecord, String> {
+    let package_hash = package_hash.unwrap_or("unavailable");
+    let wake = format!("Scheduled daemon occurrence at {scheduled_for_utc}");
+    let wake_hash = sha256(wake.as_bytes());
+    let snapshot = DaemonBindingSnapshot::from(binding);
+    let trigger = DaemonRunTrigger::Schedule;
+    let fingerprint = immutable_fingerprint(
+        &snapshot,
+        package_hash,
+        &wake_hash,
+        &trigger,
+        Some(scheduled_for_utc),
+    )?;
+    let path = run_path(app, run_id)?;
+    if let Some(existing) = read_run_path(&path)? {
+        if existing.fingerprint == fingerprint {
+            return Ok(existing);
+        }
+        return Err("scheduler receipt UUID conflicts with another occurrence".into());
+    }
+    let now = crate::util::now_iso();
+    let record = DaemonRunRecord {
+        run_id: run_id.to_string(),
+        binding_id: binding.id.clone(),
+        daemon_id: binding.daemon_id.clone(),
+        package_hash: Some(package_hash.to_string()),
+        policy_hash: Some(package_hash.to_string()),
+        fingerprint,
+        wake_hash,
+        binding: snapshot,
+        trigger,
+        scheduled_for_utc: Some(scheduled_for_utc.to_string()),
+        lifecycle: DaemonRunLifecycle::Terminal,
+        status: Some(status),
+        reserved_at: now.clone(),
+        started_at: None,
+        publishing_at: None,
+        completed_at: Some(now),
+        acp_session_id: None,
+        output_event_id: None,
+        diagnostic: Some(safe_diagnostic(diagnostic)),
+    };
+    write_run_path(&path, &record)?;
+    prune_history(app)?;
+    Ok(record)
+}
+
+pub(crate) fn binding_has_active_run(app: &AppHandle, binding_id: &str) -> Result<bool, String> {
+    for path in history_files(app)? {
+        let Some(record) = read_run_path(&path)? else {
+            continue;
+        };
+        if record.binding_id == binding_id && record.lifecycle != DaemonRunLifecycle::Terminal {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn mark_run_running(
@@ -362,9 +443,11 @@ fn immutable_fingerprint(
     package_hash: &str,
     wake_hash: &str,
     trigger: &DaemonRunTrigger,
+    scheduled_for_utc: Option<&str>,
 ) -> Result<String, String> {
-    let payload = serde_json::to_vec(&(binding, package_hash, wake_hash, trigger))
-        .map_err(|error| error.to_string())?;
+    let payload =
+        serde_json::to_vec(&(binding, package_hash, wake_hash, trigger, scheduled_for_utc))
+            .map_err(|error| error.to_string())?;
     Ok(sha256(&payload))
 }
 

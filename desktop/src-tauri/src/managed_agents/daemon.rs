@@ -2,6 +2,7 @@
 
 use std::{sync::atomic::Ordering, time::Duration};
 
+use chrono::{DateTime, Timelike as _, Utc};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
@@ -97,6 +98,14 @@ pub async fn run_managed_daemon(
     if wake.is_empty() || wake.len() > MAX_WAKE_BYTES {
         return Err("wake instruction is empty or exceeds 32 KiB".into());
     }
+    if matches!(request.trigger, super::DaemonRunTrigger::Schedule)
+        != request.scheduled_for_utc.is_some()
+    {
+        return Err("scheduled daemon runs require an explicit UTC occurrence".into());
+    }
+    if let Some(scheduled_for) = request.scheduled_for_utc.as_deref() {
+        validate_scheduled_occurrence(scheduled_for, Utc::now())?;
+    }
     let binding = get_binding_internal(&app, request.binding_id.trim())?;
     let package = load_managed_package(&app, &binding.daemon_id)?;
     let cwd =
@@ -113,6 +122,7 @@ pub async fn run_managed_daemon(
             &package.package_hash,
             wake,
             request.trigger,
+            request.scheduled_for_utc.as_deref(),
         )?
     };
     let mut record = match reservation {
@@ -190,7 +200,8 @@ async fn run_managed_daemon_inner(
     record: &mut DaemonRunRecord,
     cancellation: CancellationToken,
 ) -> Result<DaemonRunRecord, String> {
-    if let Err(error) = resolve_ready_agent(app, &binding.agent_pubkey) {
+    if let Err((_, reason)) = daemon_binding_readiness(app, binding) {
+        let error = reason.unwrap_or_else(|| "daemon binding is not ready".into());
         terminalize_safely(
             app,
             state,
@@ -434,12 +445,39 @@ pub(crate) fn cancel_all_daemon_runs(app: &AppHandle) {
     }
 }
 
-fn resolve_ready_agent(app: &AppHandle, pubkey: &str) -> Result<(), String> {
-    let records = load_managed_agents(app)?;
-    let record = records
-        .iter()
-        .find(|record| record.pubkey.eq_ignore_ascii_case(pubkey))
-        .ok_or("managed agent not found")?;
+pub(crate) fn daemon_binding_readiness(
+    app: &AppHandle,
+    binding: &super::DaemonBinding,
+) -> Result<(), (super::DaemonScheduleReadiness, Option<String>)> {
+    let result = (|| {
+        let records = load_managed_agents(app)?;
+        let record = records
+            .iter()
+            .find(|record| record.pubkey.eq_ignore_ascii_case(&binding.agent_pubkey))
+            .ok_or("managed agent not found")?;
+        if record.relay_url.trim_end_matches('/') != binding.relay_url.trim_end_matches('/') {
+            return Err("binding relay does not match the managed agent relay".into());
+        }
+        resolve_ready_agent_record(app, record)
+    })();
+    result.map_err(|error| {
+        let readiness = if error.contains("not found") {
+            super::DaemonScheduleReadiness::MissingAgent
+        } else if error.contains("relay") {
+            super::DaemonScheduleReadiness::RelayMismatch
+        } else if error.contains("does not support") || error.contains("local managed agent") {
+            super::DaemonScheduleReadiness::UnsupportedRuntime
+        } else {
+            super::DaemonScheduleReadiness::AgentNotReady
+        };
+        (readiness, Some(error))
+    })
+}
+
+fn resolve_ready_agent_record(
+    app: &AppHandle,
+    record: &super::ManagedAgentRecord,
+) -> Result<(), String> {
     if record.backend != BackendKind::Local {
         return Err("daemon runs require a local managed agent".into());
     }
@@ -553,6 +591,25 @@ fn validate_loopback_control_url(value: &str) -> Result<String, String> {
 fn daemon_run_marker(run_id: Uuid) -> String {
     format!("daemon-run:{run_id}")
 }
+
+fn validate_scheduled_occurrence(value: &str, now: DateTime<Utc>) -> Result<(), String> {
+    let parsed = DateTime::parse_from_rfc3339(value)
+        .map_err(|error| format!("invalid scheduled UTC occurrence: {error}"))?;
+    if parsed.offset().local_minus_utc() != 0 {
+        return Err("scheduled occurrence must use an explicit UTC offset".into());
+    }
+    let occurrence = parsed.with_timezone(&Utc);
+    let minute = |value: DateTime<Utc>| {
+        value
+            .with_second(0)
+            .and_then(|value| value.with_nanosecond(0))
+    };
+    if minute(occurrence) != minute(now) {
+        return Err("scheduled occurrence is no longer in the current UTC minute".into());
+    }
+    Ok(())
+}
+
 fn safe_diagnostic(value: &str) -> String {
     value.chars().take(MAX_DIAGNOSTIC_CHARS).collect()
 }
@@ -581,5 +638,15 @@ mod tests {
     fn publication_marker_is_stable() {
         let run_id = Uuid::new_v4();
         assert_eq!(daemon_run_marker(run_id), format!("daemon-run:{run_id}"));
+    }
+
+    #[test]
+    fn scheduled_occurrence_must_be_current_utc_minute() {
+        let now = DateTime::parse_from_rfc3339("2026-07-24T21:00:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(validate_scheduled_occurrence("2026-07-24T21:00:00Z", now).is_ok());
+        assert!(validate_scheduled_occurrence("2026-07-24T20:59:00Z", now).is_err());
+        assert!(validate_scheduled_occurrence("2026-07-24T23:00:00+02:00", now).is_err());
     }
 }

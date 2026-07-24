@@ -49,12 +49,14 @@ use huddle::{
 use managed_agents::{
     backfill_persona_snapshots, cancel_managed_daemon, create_daemon_binding,
     create_daemon_package, delete_daemon_binding, delete_daemon_package, ensure_nest,
-    export_daemon_package, get_daemon_binding, get_daemon_package, import_daemon_package,
-    list_daemon_bindings, list_daemon_packages, list_daemon_run_history,
-    list_managed_agent_runtimes, open_daemon_library_folder, put_managed_agent_runtime_lifecycle,
-    reconcile_managed_agent_runtimes, restart_managed_agent_runtime, run_managed_daemon,
+    export_daemon_package_with_picker, get_daemon_binding, get_daemon_package,
+    get_daemon_schedule_status, list_daemon_bindings, list_daemon_packages,
+    list_daemon_run_history, list_managed_agent_runtimes, open_daemon_library_folder,
+    pick_and_import_daemon_folder, pick_and_import_daemon_md, pick_daemon_context_folder,
+    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
+    restart_managed_agent_runtime, run_managed_daemon, start_daemon_scheduler,
     start_managed_agent_runtime, stop_managed_agent_runtime, try_regenerate_nest,
-    update_daemon_binding,
+    update_daemon_binding, update_daemon_package,
 };
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
@@ -538,6 +540,9 @@ pub fn run() {
             if let Err(error) = managed_agents::recover_interrupted_runs(&app_handle) {
                 eprintln!("buzz-desktop: failed to reconcile daemon run history: {error}");
             }
+            if let Err(error) = start_daemon_scheduler(&app_handle) {
+                eprintln!("buzz-desktop: failed to start daemon scheduler: {error}");
+            }
 
             // Sync team-dir edits and reconcile persona/team/agent events after
             // setup can continue. It is best-effort retention backfill, unlike
@@ -747,12 +752,16 @@ pub fn run() {
             list_daemon_packages,
             get_daemon_package,
             create_daemon_package,
-            import_daemon_package,
-            export_daemon_package,
+            update_daemon_package,
+            pick_and_import_daemon_md,
+            pick_and_import_daemon_folder,
+            pick_daemon_context_folder,
+            export_daemon_package_with_picker,
             delete_daemon_package,
             open_daemon_library_folder,
             list_daemon_bindings,
             get_daemon_binding,
+            get_daemon_schedule_status,
             create_daemon_binding,
             update_daemon_binding,
             delete_daemon_binding,

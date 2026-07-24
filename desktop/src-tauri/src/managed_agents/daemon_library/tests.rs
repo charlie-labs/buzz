@@ -5,7 +5,7 @@ use uuid::Uuid;
 use super::{
     package::{
         copy_source_to_staging, load_package_directory, promote_package, safe_export,
-        stage_package, MAX_PACKAGE_DEPTH, MAX_PACKAGE_FILES,
+        stage_package, stage_package_update, MAX_PACKAGE_DEPTH, MAX_PACKAGE_FILES,
     },
     store::{read_run_path, reserve_run_at_path, write_run_path, Reservation},
     DaemonActivationMode, DaemonBinding, DaemonRunLifecycle, DaemonRunStatus, DaemonRunTrigger,
@@ -196,6 +196,43 @@ fn duplicate_replace_and_export_are_non_destructive() {
     assert!(safe_export(&library.join("safe"), &export).is_err());
 }
 
+#[test]
+fn atomic_package_update_preserves_support_tree_and_rejects_id_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp.path().join("library");
+    std::fs::create_dir(&library).unwrap();
+    let original = daemon_md("editable", "schedule: \"0 * * * *\"\n");
+    let (staging, _) = stage_package(
+        &library,
+        original.as_bytes(),
+        [(
+            PathBuf::from("scripts/check.sh"),
+            b"#!/bin/sh\necho ok\n".to_vec(),
+            true,
+        )],
+    )
+    .unwrap();
+    promote_package(&library, &staging, "editable", false).unwrap();
+    let existing = load_package_directory(&library.join("editable"), Some("editable")).unwrap();
+    let updated = daemon_md("editable", "schedule: \"15 * * * *\"\n");
+    let (replacement, loaded) =
+        stage_package_update(&library, &existing, updated.as_bytes()).unwrap();
+    promote_package(&library, &replacement, "editable", true).unwrap();
+    assert_eq!(
+        std::fs::read(library.join("editable/scripts/check.sh")).unwrap(),
+        b"#!/bin/sh\necho ok\n"
+    );
+    assert_ne!(existing.package_hash, loaded.package_hash);
+
+    let installed = load_package_directory(&library.join("editable"), Some("editable")).unwrap();
+    let wrong_id = daemon_md("renamed", "schedule: \"15 * * * *\"\n");
+    assert!(stage_package_update(&library, &installed, wrong_id.as_bytes()).is_err());
+    assert_eq!(
+        std::fs::read_to_string(library.join("editable/DAEMON.md")).unwrap(),
+        updated
+    );
+}
+
 fn binding() -> DaemonBinding {
     let now = "2026-07-24T00:00:00Z".to_string();
     DaemonBinding {
@@ -240,6 +277,7 @@ fn durable_run_reservation_is_idempotent_and_conflict_safe() {
         "package-hash",
         "safe wake",
         DaemonRunTrigger::Manual,
+        None,
     )
     .unwrap() else {
         panic!("expected new reservation")
@@ -256,6 +294,7 @@ fn durable_run_reservation_is_idempotent_and_conflict_safe() {
             "package-hash",
             "safe wake",
             DaemonRunTrigger::Manual,
+            None,
         )
         .unwrap(),
         Reservation::ExistingTerminal(_)
@@ -267,6 +306,7 @@ fn durable_run_reservation_is_idempotent_and_conflict_safe() {
         "different-hash",
         "safe wake",
         DaemonRunTrigger::Manual,
+        None,
     )
     .unwrap_err()
     .contains("conflicts"));
@@ -285,6 +325,7 @@ fn terminal_receipts_are_immutable_and_publishing_is_recoverable() {
         "package-hash",
         "wake",
         DaemonRunTrigger::Manual,
+        None,
     )
     .unwrap() else {
         panic!("expected new reservation")

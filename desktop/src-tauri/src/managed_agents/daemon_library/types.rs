@@ -1,5 +1,12 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDaemonPackageRequest {
+    pub daemon_id: String,
+    pub daemon_md: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonActivationMode {
@@ -65,13 +72,6 @@ pub struct ImportDaemonPackageRequest {
     pub source_path: String,
     #[serde(default)]
     pub replace: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportDaemonPackageRequest {
-    pub daemon_id: String,
-    pub destination_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,6 +174,8 @@ pub struct RunManagedDaemonRequest {
     pub wake_instruction: String,
     #[serde(default)]
     pub trigger: DaemonRunTrigger,
+    #[serde(default)]
+    pub scheduled_for_utc: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +194,57 @@ pub enum DaemonRunStatus {
     Failed,
     Cancelled,
     Interrupted,
+    Missed,
+    SkippedOverlap,
+    SkippedUnready,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonScheduleReadiness {
+    Ready,
+    Disabled,
+    WatchOnly,
+    MissingPackage,
+    InvalidSchedule,
+    MissingAgent,
+    RelayMismatch,
+    UnsupportedRuntime,
+    AgentNotReady,
+    InvalidContext,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonSchedulerDecisionKind {
+    Ready,
+    Executed,
+    Missed,
+    SkippedOverlap,
+    SkippedUnready,
+    Disabled,
+    WatchOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonSchedulerDecision {
+    pub kind: DaemonSchedulerDecisionKind,
+    pub decided_at_utc: String,
+    pub scheduled_for_utc: Option<String>,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonScheduleStatus {
+    pub binding_id: String,
+    pub schedule: Option<String>,
+    pub schedule_hash: Option<String>,
+    pub readiness: DaemonScheduleReadiness,
+    pub readiness_reason: Option<String>,
+    pub next_occurrence_utc: Option<String>,
+    pub last_decision: Option<DaemonSchedulerDecision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,6 +285,8 @@ pub struct DaemonRunRecord {
     pub wake_hash: String,
     pub binding: DaemonBindingSnapshot,
     pub trigger: DaemonRunTrigger,
+    #[serde(default)]
+    pub scheduled_for_utc: Option<String>,
     pub lifecycle: DaemonRunLifecycle,
     pub status: Option<DaemonRunStatus>,
     pub reserved_at: String,

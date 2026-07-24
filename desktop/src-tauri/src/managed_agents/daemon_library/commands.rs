@@ -1,18 +1,19 @@
 use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
 
 use super::{
     package::{
         copy_source_to_staging, load_package_directory, package_summary, promote_package,
-        safe_export, stage_package,
+        safe_export, stage_package, stage_package_update,
     },
     store::{list_history, reconcile_publishing_success},
     BindingStore, CreateDaemonBindingRequest, CreateDaemonPackageRequest, DaemonBinding,
     DaemonBindingSummary, DaemonHistoryEntry, DaemonPackageDetail, DaemonPackageSummary,
-    ExportDaemonPackageRequest, ImportDaemonPackageRequest, UpdateDaemonBindingRequest,
+    ImportDaemonPackageRequest, UpdateDaemonBindingRequest, UpdateDaemonPackageRequest,
 };
 use crate::commands::managed_agent_channel_message_event_id_by_marker;
 use crate::{
@@ -79,7 +80,24 @@ pub fn create_daemon_package(
 }
 
 #[tauri::command]
-pub fn import_daemon_package(
+pub fn update_daemon_package(
+    request: UpdateDaemonPackageRequest,
+    app: AppHandle,
+) -> Result<DaemonPackageSummary, String> {
+    let state = app.state::<AppState>();
+    let _guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let daemon_id = request.daemon_id.trim();
+    let existing = super::load_managed_package(&app, daemon_id)?;
+    let root = super::daemon_library_root(&app)?;
+    let (staging, loaded) = stage_package_update(&root, &existing, request.daemon_md.as_bytes())?;
+    promote_package(&root, &staging, daemon_id, true)?;
+    Ok(package_summary(&loaded))
+}
+
+pub(crate) fn import_daemon_package(
     request: ImportDaemonPackageRequest,
     app: AppHandle,
 ) -> Result<DaemonPackageSummary, String> {
@@ -96,15 +114,61 @@ pub fn import_daemon_package(
 }
 
 #[tauri::command]
-pub fn export_daemon_package(
-    request: ExportDaemonPackageRequest,
+pub async fn pick_and_import_daemon_md(
+    replace: bool,
     app: AppHandle,
-) -> Result<(), String> {
-    let package = super::load_managed_package(&app, request.daemon_id.trim())?;
-    safe_export(
-        &package.directory,
-        &absolute_destination(&request.destination_path)?,
+) -> Result<Option<DaemonPackageSummary>, String> {
+    let Some(source_path) = pick_file(&app).await? else {
+        return Ok(None);
+    };
+    import_daemon_package(
+        ImportDaemonPackageRequest {
+            source_path,
+            replace,
+        },
+        app,
     )
+    .map(Some)
+}
+
+#[tauri::command]
+pub async fn pick_and_import_daemon_folder(
+    replace: bool,
+    app: AppHandle,
+) -> Result<Option<DaemonPackageSummary>, String> {
+    let Some(source_path) = pick_folder(&app).await? else {
+        return Ok(None);
+    };
+    import_daemon_package(
+        ImportDaemonPackageRequest {
+            source_path,
+            replace,
+        },
+        app,
+    )
+    .map(Some)
+}
+
+#[tauri::command]
+pub async fn pick_daemon_context_folder(app: AppHandle) -> Result<Option<String>, String> {
+    let Some(selected) = pick_folder(&app).await? else {
+        return Ok(None);
+    };
+    canonical_context(Some(&selected))
+}
+
+#[tauri::command]
+pub async fn export_daemon_package_with_picker(
+    daemon_id: String,
+    app: AppHandle,
+) -> Result<bool, String> {
+    let Some(parent) = pick_folder(&app).await? else {
+        return Ok(false);
+    };
+    let daemon_id = daemon_id.trim();
+    let package = super::load_managed_package(&app, daemon_id)?;
+    safe_export(&package.directory, &Path::new(&parent).join(daemon_id))?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -155,6 +219,14 @@ pub fn get_daemon_binding(
 }
 
 #[tauri::command]
+pub fn get_daemon_schedule_status(
+    binding_id: String,
+    app: AppHandle,
+) -> Result<super::DaemonScheduleStatus, String> {
+    super::get_schedule_status(&app, binding_id.trim())
+}
+
+#[tauri::command]
 pub fn create_daemon_binding(
     request: CreateDaemonBindingRequest,
     app: AppHandle,
@@ -166,7 +238,7 @@ pub fn create_daemon_binding(
         .map_err(|error| error.to_string())?;
     super::load_managed_package(&app, request.daemon_id.trim())?;
     let key = ManagedAgentRuntimeKey::new(request.agent_pubkey, &request.relay_url)?;
-    validate_managed_agent_exists(&app, &key.pubkey)?;
+    validate_managed_agent_relationship(&app, &key.pubkey, &key.relay_url)?;
     let channel_id = Uuid::parse_str(request.channel_id.trim())
         .map_err(|_| "invalid channel UUID")?
         .to_string();
@@ -217,7 +289,7 @@ pub fn update_daemon_binding(
                 .unwrap_or_else(|| binding.agent_pubkey.clone()),
             request.relay_url.as_deref().unwrap_or(&binding.relay_url),
         )?;
-        validate_managed_agent_exists(&app, &key.pubkey)?;
+        validate_managed_agent_relationship(&app, &key.pubkey, &key.relay_url)?;
         binding.agent_pubkey = key.pubkey;
         binding.relay_url = key.relay_url;
     }
@@ -333,26 +405,55 @@ fn canonical_source(value: &str) -> Result<PathBuf, String> {
     std::fs::canonicalize(value).map_err(|error| format!("invalid import source: {error}"))
 }
 
-fn absolute_destination(value: &str) -> Result<PathBuf, String> {
-    let path = Path::new(value.trim());
-    if !path.is_absolute() || path.file_name().is_none() {
-        return Err("export destination must be a non-empty absolute package path".into());
+fn validate_managed_agent_relationship(
+    app: &AppHandle,
+    pubkey: &str,
+    relay_url: &str,
+) -> Result<(), String> {
+    let records = load_managed_agents(app)?;
+    let record = records
+        .iter()
+        .find(|record| record.pubkey.eq_ignore_ascii_case(pubkey))
+        .ok_or("managed agent not found")?;
+    if record.relay_url.trim_end_matches('/') != relay_url.trim_end_matches('/') {
+        return Err("daemon binding relay must match the selected managed agent relay".into());
     }
-    let parent = path
-        .parent()
-        .ok_or("export destination requires a parent directory")?;
-    let parent = std::fs::canonicalize(parent)
-        .map_err(|error| format!("invalid export destination parent: {error}"))?;
-    Ok(parent.join(path.file_name().ok_or("invalid export destination")?))
+    Ok(())
 }
 
-fn validate_managed_agent_exists(app: &AppHandle, pubkey: &str) -> Result<(), String> {
-    if load_managed_agents(app)?
-        .iter()
-        .any(|record| record.pubkey.eq_ignore_ascii_case(pubkey))
-    {
-        Ok(())
-    } else {
-        Err("managed agent not found".into())
-    }
+async fn pick_file(app: &AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("DAEMON.md", &["md"])
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let selected = rx
+        .await
+        .map_err(|_| "daemon file picker closed unexpectedly")?;
+    selected
+        .map(|path| {
+            path.as_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .ok_or_else(|| "daemon file picker returned a non-filesystem path".into())
+        })
+        .transpose()
+}
+
+async fn pick_folder(app: &AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |path| {
+        let _ = tx.send(path);
+    });
+    let selected = rx
+        .await
+        .map_err(|_| "daemon folder picker closed unexpectedly")?;
+    selected
+        .map(|path| {
+            path.as_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .ok_or_else(|| "daemon folder picker returned a non-filesystem path".into())
+        })
+        .transpose()
 }

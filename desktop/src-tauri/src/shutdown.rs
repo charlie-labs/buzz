@@ -19,6 +19,7 @@ pub(crate) fn shut_down_app(app: &tauri::AppHandle, shutdown_done: &std::sync::a
         .store(true, Ordering::SeqCst);
     if !shutdown_done.swap(true, Ordering::SeqCst) {
         prevent_sleep::release(&app.state::<AppState>().prevent_sleep);
+        managed_agents::stop_daemon_scheduler(app);
         managed_agents::cancel_all_daemon_runs(app);
         std::thread::sleep(std::time::Duration::from_millis(250));
         if let Err(error) = shutdown_managed_agents(app) {
@@ -42,6 +43,7 @@ pub(crate) fn install_signal_handler(
             .shutdown_started
             .store(true, Ordering::SeqCst);
         if !shutdown_done.swap(true, Ordering::SeqCst) {
+            managed_agents::stop_daemon_scheduler(&app);
             managed_agents::cancel_all_daemon_runs(&app);
             std::thread::sleep(std::time::Duration::from_millis(250));
             let _ = shutdown_managed_agents(&app);

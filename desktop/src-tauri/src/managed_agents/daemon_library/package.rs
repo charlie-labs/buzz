@@ -147,6 +147,33 @@ pub(crate) fn copy_source_to_staging(
     stage_package(library, &daemon_md, support)
 }
 
+pub(crate) fn stage_package_update(
+    library: &Path,
+    existing: &LoadedDaemonPackage,
+    daemon_md: &[u8],
+) -> Result<(PathBuf, LoadedDaemonPackage), String> {
+    let paths = inspect_package_tree(&existing.directory)?;
+    let mut support = Vec::new();
+    for relative in paths
+        .into_iter()
+        .filter(|path| path != Path::new("DAEMON.md"))
+    {
+        let source_path = existing.directory.join(&relative);
+        support.push((
+            relative,
+            fs::read(&source_path).map_err(|error| error.to_string())?,
+            is_executable(&source_path),
+        ));
+    }
+    let (staging, loaded) = stage_package(library, daemon_md, support)?;
+    if loaded.policy.id != existing.policy.id {
+        let _ = fs::remove_dir_all(&staging);
+        return Err("updated DAEMON.md id must match the installed package id".into());
+    }
+    load_package_directory(&staging, Some(&existing.policy.id))?;
+    Ok((staging, loaded))
+}
+
 pub(crate) fn promote_package(
     library: &Path,
     staging: &Path,

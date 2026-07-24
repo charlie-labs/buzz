@@ -11,7 +11,29 @@ export type DaemonRunStatus =
   | "succeeded"
   | "failed"
   | "cancelled"
-  | "interrupted";
+  | "interrupted"
+  | "missed"
+  | "skipped_overlap"
+  | "skipped_unready";
+export type DaemonScheduleReadiness =
+  | "ready"
+  | "disabled"
+  | "watch_only"
+  | "missing_package"
+  | "invalid_schedule"
+  | "missing_agent"
+  | "relay_mismatch"
+  | "unsupported_runtime"
+  | "agent_not_ready"
+  | "invalid_context";
+export type DaemonSchedulerDecisionKind =
+  | "ready"
+  | "executed"
+  | "missed"
+  | "skipped_overlap"
+  | "skipped_unready"
+  | "disabled"
+  | "watch_only";
 
 export interface DaemonPackageSummary {
   id: string;
@@ -47,6 +69,7 @@ export interface DaemonRunRecord {
   packageHash: string | null;
   policyHash: string | null;
   trigger: DaemonRunTrigger;
+  scheduledForUtc: string | null;
   lifecycle: DaemonRunLifecycle;
   status: DaemonRunStatus | null;
   reservedAt: string;
@@ -70,6 +93,21 @@ export interface LegacyDaemonRunRecord {
   diagnostic: string | null;
 }
 
+export interface DaemonScheduleStatus {
+  bindingId: string;
+  schedule: string | null;
+  scheduleHash: string | null;
+  readiness: DaemonScheduleReadiness;
+  readinessReason: string | null;
+  nextOccurrenceUtc: string | null;
+  lastDecision: {
+    kind: DaemonSchedulerDecisionKind;
+    decidedAtUtc: string;
+    scheduledForUtc: string | null;
+    diagnostic: string | null;
+  } | null;
+}
+
 export const listDaemonPackages = () =>
   invokeTauri<DaemonPackageSummary[]>("list_daemon_packages");
 
@@ -81,18 +119,26 @@ export const createDaemonPackage = (request: {
   files?: Array<{ path: string; bytes: number[]; executable?: boolean }>;
 }) => invokeTauri<DaemonPackageSummary>("create_daemon_package", { request });
 
-export const importDaemonPackage = (sourcePath: string, replace = false) =>
-  invokeTauri<DaemonPackageSummary>("import_daemon_package", {
-    request: { sourcePath, replace },
+export const updateDaemonPackage = (request: {
+  daemonId: string;
+  daemonMd: string;
+}) => invokeTauri<DaemonPackageSummary>("update_daemon_package", { request });
+
+export const pickAndImportDaemonMd = (replace = false) =>
+  invokeTauri<DaemonPackageSummary | null>("pick_and_import_daemon_md", {
+    replace,
   });
 
-export const exportDaemonPackage = (
-  daemonId: string,
-  destinationPath: string,
-) =>
-  invokeTauri<void>("export_daemon_package", {
-    request: { daemonId, destinationPath },
+export const pickAndImportDaemonFolder = (replace = false) =>
+  invokeTauri<DaemonPackageSummary | null>("pick_and_import_daemon_folder", {
+    replace,
   });
+
+export const pickDaemonContextFolder = () =>
+  invokeTauri<string | null>("pick_daemon_context_folder");
+
+export const exportDaemonPackageWithPicker = (daemonId: string) =>
+  invokeTauri<boolean>("export_daemon_package_with_picker", { daemonId });
 
 export const deleteDaemonPackage = (daemonId: string) =>
   invokeTauri<void>("delete_daemon_package", { daemonId });
@@ -105,6 +151,11 @@ export const listDaemonBindings = () =>
 
 export const getDaemonBinding = (bindingId: string) =>
   invokeTauri<DaemonBinding>("get_daemon_binding", { bindingId });
+
+export const getDaemonScheduleStatus = (bindingId: string) =>
+  invokeTauri<DaemonScheduleStatus>("get_daemon_schedule_status", {
+    bindingId,
+  });
 
 export const createDaemonBinding = (request: {
   daemonId: string;
@@ -133,6 +184,7 @@ export const runManagedDaemon = (request: {
   bindingId: string;
   wakeInstruction: string;
   trigger?: DaemonRunTrigger;
+  scheduledForUtc?: string;
 }) => invokeTauri<DaemonRunRecord>("run_managed_daemon", { request });
 
 export const cancelManagedDaemon = (runId: string) =>
