@@ -8,7 +8,10 @@ import {
   useDaemonPackagesQuery,
   useImportDaemonMutation,
 } from "@/features/daemons/hooks";
-import { activationModeLabel } from "@/features/daemons/lib/presentation";
+import {
+  activationModeLabel,
+  formatDaemonActionError,
+} from "@/features/daemons/lib/presentation";
 import { openDaemonLibraryFolder } from "@/shared/api/tauriDaemons";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
@@ -24,6 +27,7 @@ export function DaemonsView() {
   const importFolder = useImportDaemonMutation("folder");
   const [createOpen, setCreateOpen] = React.useState(false);
   const [search, setSearch] = React.useState("");
+  const [openingFolder, setOpeningFolder] = React.useState(false);
   const packages = packagesQuery.data ?? [];
   const bindings = bindingsQuery.data ?? [];
   const filtered = packages.filter((item) =>
@@ -55,6 +59,18 @@ export function DaemonsView() {
     }
   }
 
+  async function handleOpenFolder() {
+    if (openingFolder) return;
+    setOpeningFolder(true);
+    try {
+      await openDaemonLibraryFolder();
+    } catch (error) {
+      toast.error(formatDaemonActionError("Open daemon folder", error));
+    } finally {
+      setOpeningFolder(false);
+    }
+  }
+
   if (packagesQuery.isLoading) {
     return (
       <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
@@ -77,6 +93,7 @@ export function DaemonsView() {
                 New daemon
               </Button>
               <Button
+                disabled={importFile.isPending}
                 onClick={() => void handleImport("file")}
                 size="sm"
                 variant="outline"
@@ -85,6 +102,7 @@ export function DaemonsView() {
                 Import DAEMON.md
               </Button>
               <Button
+                disabled={importFolder.isPending}
                 onClick={() => void handleImport("folder")}
                 size="sm"
                 variant="outline"
@@ -128,22 +146,25 @@ export function DaemonsView() {
                 New daemon
               </Button>
               <Button
+                disabled={importFile.isPending}
                 onClick={() => void handleImport("file")}
                 variant="outline"
               >
                 Import DAEMON.md
               </Button>
               <Button
+                disabled={importFolder.isPending}
                 onClick={() => void handleImport("folder")}
                 variant="outline"
               >
                 Import folder
               </Button>
               <Button
-                onClick={() => void openDaemonLibraryFolder()}
+                disabled={openingFolder}
+                onClick={() => void handleOpenFolder()}
                 variant="ghost"
               >
-                Open daemon folder
+                {openingFolder ? "Opening…" : "Open daemon folder"}
               </Button>
             </div>
           </div>
@@ -161,11 +182,12 @@ export function DaemonsView() {
                 />
               </div>
               <Button
-                onClick={() => void openDaemonLibraryFolder()}
+                disabled={openingFolder}
+                onClick={() => void handleOpenFolder()}
                 size="sm"
                 variant="ghost"
               >
-                Open folder
+                {openingFolder ? "Opening…" : "Open folder"}
               </Button>
             </div>
             <div className="grid gap-3 md:grid-cols-2">
@@ -205,6 +227,18 @@ export function DaemonsView() {
                             : "Set up"
                           : "Setup needed"}
                       </span>
+                      {daemon.hasScripts ? (
+                        <>
+                          <span>·</span>
+                          <span>Scripts</span>
+                        </>
+                      ) : null}
+                      {daemon.hasReferences ? (
+                        <>
+                          <span>·</span>
+                          <span>References</span>
+                        </>
+                      ) : null}
                     </div>
                   </button>
                 );

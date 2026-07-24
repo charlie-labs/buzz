@@ -30,7 +30,9 @@ import {
 import { suggestedWakeInstruction } from "@/features/daemons/lib/daemonTemplate";
 import {
   activationModeLabel,
+  daemonOutputAction,
   durationLabel,
+  formatDaemonActionError,
   formatUtcAndLocal,
   readinessLabel,
   runStateLabel,
@@ -72,7 +74,7 @@ const selectClassName =
   "h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
 
 export function DaemonDetailView({ daemonId }: { daemonId: string }) {
-  const { goDaemons } = useAppNavigation();
+  const { goChannel, goDaemons } = useAppNavigation();
   const packageQuery = useDaemonPackageQuery(daemonId);
   const bindingsQuery = useDaemonBindingsQuery();
   const historyQuery = useDaemonHistoryQuery();
@@ -83,6 +85,8 @@ export function DaemonDetailView({ daemonId }: { daemonId: string }) {
   const deleteBinding = useDeleteDaemonBindingMutation();
   const [editOpen, setEditOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const [exporting, setExporting] = React.useState(false);
+  const [openingFolder, setOpeningFolder] = React.useState(false);
 
   if (packageQuery.isLoading) {
     return (
@@ -128,6 +132,31 @@ export function DaemonDetailView({ daemonId }: { daemonId: string }) {
     }
   }
 
+  async function handleExport() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const exported = await exportDaemonPackageWithPicker(daemonId);
+      if (exported) toast.success("Daemon exported");
+    } catch (error) {
+      toast.error(formatDaemonActionError("Export daemon", error));
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function handleOpenFolder() {
+    if (openingFolder) return;
+    setOpeningFolder(true);
+    try {
+      await openDaemonLibraryFolder();
+    } catch (error) {
+      toast.error(formatDaemonActionError("Open daemon folder", error));
+    } finally {
+      setOpeningFolder(false);
+    }
+  }
+
   return (
     <div
       className="flex min-h-0 flex-1 flex-col overflow-y-auto"
@@ -155,24 +184,22 @@ export function DaemonDetailView({ daemonId }: { daemonId: string }) {
                 Edit DAEMON.md
               </Button>
               <Button
-                onClick={() =>
-                  void exportDaemonPackageWithPicker(daemonId).then(
-                    (exported) => exported && toast.success("Daemon exported"),
-                  )
-                }
+                disabled={exporting}
+                onClick={() => void handleExport()}
                 size="sm"
                 variant="outline"
               >
                 <Download className="h-4 w-4" />
-                Export
+                {exporting ? "Exporting…" : "Export"}
               </Button>
               <Button
-                onClick={() => void openDaemonLibraryFolder()}
+                disabled={openingFolder}
+                onClick={() => void handleOpenFolder()}
                 size="sm"
                 variant="outline"
               >
                 <FolderOpen className="h-4 w-4" />
-                Open folder
+                {openingFolder ? "Opening…" : "Open folder"}
               </Button>
               <Button
                 onClick={() => setDeleteOpen(true)}
@@ -209,6 +236,18 @@ export function DaemonDetailView({ daemonId }: { daemonId: string }) {
           />
         </div>
 
+        {daemon.hasScripts || daemon.hasReferences ? (
+          <fieldset className="flex flex-wrap gap-2">
+            <legend className="sr-only">Package contents</legend>
+            {daemon.hasScripts ? (
+              <Badge variant="outline">Scripts</Badge>
+            ) : null}
+            {daemon.hasReferences ? (
+              <Badge variant="outline">References</Badge>
+            ) : null}
+          </fieldset>
+        ) : null}
+
         <SetupPanel
           binding={binding}
           daemonId={daemonId}
@@ -231,30 +270,57 @@ export function DaemonDetailView({ daemonId }: { daemonId: string }) {
                 Checking schedule…
               </p>
             ) : scheduleQuery.data ? (
-              <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
-                <Info
-                  label="Cron"
-                  value={scheduleQuery.data.schedule ?? "Not configured"}
-                />
-                <Info
-                  label="Readiness"
-                  value={readinessLabel(scheduleQuery.data.readiness)}
-                />
-                <Info
-                  label="Next occurrence"
-                  value={formatUtcAndLocal(
-                    scheduleQuery.data.nextOccurrenceUtc,
-                  )}
-                />
-                <Info
-                  label="Last scheduler decision"
-                  value={
-                    scheduleQuery.data.lastDecision
-                      ? `${scheduleQuery.data.lastDecision.kind} · ${formatUtcAndLocal(scheduleQuery.data.lastDecision.decidedAtUtc)}`
-                      : "No decision yet"
-                  }
-                />
-              </dl>
+              <div className="mt-4 space-y-4">
+                {scheduleQuery.data.readiness === "channel_unavailable" ? (
+                  <p
+                    className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm"
+                    role="alert"
+                  >
+                    The selected output channel could not be validated. Buzz
+                    must reach the active relay before setup can be considered
+                    ready. Reconnect to the relay or choose an available
+                    channel, then save setup again.
+                  </p>
+                ) : scheduleQuery.data.readinessReason ? (
+                  <p className="rounded-xl border border-border bg-muted/50 p-3 text-sm">
+                    {scheduleQuery.data.readinessReason}
+                  </p>
+                ) : null}
+                <dl className="grid gap-4 text-sm sm:grid-cols-2">
+                  <Info
+                    label="Cron"
+                    value={scheduleQuery.data.schedule ?? "Not configured"}
+                  />
+                  <Info
+                    label="Readiness"
+                    value={readinessLabel(scheduleQuery.data.readiness)}
+                  />
+                  <Info
+                    label="Next occurrence"
+                    value={formatUtcAndLocal(
+                      scheduleQuery.data.nextOccurrenceUtc,
+                    )}
+                  />
+                  <Info
+                    label="Last scheduler decision"
+                    value={
+                      scheduleQuery.data.lastDecision
+                        ? `${scheduleQuery.data.lastDecision.kind} · ${formatUtcAndLocal(scheduleQuery.data.lastDecision.decidedAtUtc)}`
+                        : "No decision yet"
+                    }
+                  />
+                </dl>
+                {scheduleQuery.data.lastDecision?.diagnostic ? (
+                  <details className="text-sm">
+                    <summary className="cursor-pointer text-muted-foreground">
+                      Scheduler diagnostic
+                    </summary>
+                    <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-xl bg-muted p-3 text-xs">
+                      {scheduleQuery.data.lastDecision.diagnostic}
+                    </pre>
+                  </details>
+                ) : null}
+              </div>
             ) : null}
           </section>
         ) : null}
@@ -264,7 +330,12 @@ export function DaemonDetailView({ daemonId }: { daemonId: string }) {
           daemon={daemon}
           history={daemonHistory}
         />
-        <HistoryPanel records={daemonHistory} />
+        <HistoryPanel
+          onViewOutput={(channelId, eventId) =>
+            void goChannel(channelId, { messageId: eventId })
+          }
+          records={daemonHistory}
+        />
       </div>
       <DaemonEditor
         daemonId={daemonId}
@@ -350,6 +421,7 @@ function SetupPanel({
   const [scheduleEnabled, setScheduleEnabled] = React.useState(
     binding?.scheduleEnabled ?? !watchOnly,
   );
+  const [pickingContext, setPickingContext] = React.useState(false);
   const save = useSaveDaemonBindingMutation(binding?.id);
   const remove = useDeleteDaemonBindingMutation();
 
@@ -458,17 +530,32 @@ function SetupPanel({
           <span>Context folder</span>
           <div className="flex gap-2">
             <Button
+              disabled={pickingContext}
               onClick={async () => {
-                const path = await pickDaemonContextFolder();
-                if (path) {
-                  setContextDirectory(path);
-                  setContextConfigured(true);
+                if (pickingContext) return;
+                setPickingContext(true);
+                try {
+                  const path = await pickDaemonContextFolder();
+                  if (path) {
+                    setContextDirectory(path);
+                    setContextConfigured(true);
+                  }
+                } catch (error) {
+                  toast.error(
+                    formatDaemonActionError("Choose context folder", error),
+                  );
+                } finally {
+                  setPickingContext(false);
                 }
               }}
               type="button"
               variant="outline"
             >
-              {contextConfigured ? "Change folder" : "Choose folder"}
+              {pickingContext
+                ? "Choosing…"
+                : contextConfigured
+                  ? "Change folder"
+                  : "Choose folder"}
             </Button>
             {contextConfigured ? (
               <Button
@@ -639,7 +726,13 @@ function RunPanel({
   );
 }
 
-function HistoryPanel({ records }: { records: HistoryRecord[] }) {
+function HistoryPanel({
+  onViewOutput,
+  records,
+}: {
+  onViewOutput: (channelId: string, eventId: string) => void;
+  records: HistoryRecord[];
+}) {
   return (
     <section className="rounded-2xl border border-border bg-card p-5">
       <SectionHeader
@@ -652,6 +745,11 @@ function HistoryPanel({ records }: { records: HistoryRecord[] }) {
         <div className="mt-4 divide-y divide-border">
           {records.map((record) => {
             const managed = record.recordType === "managed";
+            const outputAction = daemonOutputAction({
+              status: record.status,
+              outputEventId: record.outputEventId,
+              channelId: managed ? record.binding.channelId : null,
+            });
             const started = managed
               ? (record.startedAt ?? record.reservedAt)
               : record.startedAt;
@@ -660,7 +758,19 @@ function HistoryPanel({ records }: { records: HistoryRecord[] }) {
               <div className="py-4 first:pt-0" key={record.runId}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
-                    <Badge variant="secondary">
+                    <Badge
+                      variant={
+                        record.status === "succeeded"
+                          ? "success"
+                          : record.status === "no_op"
+                            ? "info"
+                            : record.status === "failed"
+                              ? "destructive"
+                              : record.status === "missed"
+                                ? "warning"
+                                : "secondary"
+                      }
+                    >
                       {managed
                         ? runStateLabel(record.lifecycle, record.status)
                         : runStateLabel("terminal", record.status)}
@@ -689,10 +799,51 @@ function HistoryPanel({ records }: { records: HistoryRecord[] }) {
                     </pre>
                   </details>
                 ) : null}
-                {record.outputEventId ? (
-                  <p className="mt-2 break-all text-xs text-muted-foreground">
-                    Output event: {record.outputEventId}
-                  </p>
+                {outputAction.kind === "view" ? (
+                  <Button
+                    className="mt-2"
+                    onClick={() =>
+                      onViewOutput(outputAction.channelId, outputAction.eventId)
+                    }
+                    size="sm"
+                    variant="outline"
+                  >
+                    View output
+                  </Button>
+                ) : outputAction.kind === "event_id" ? (
+                  <details className="mt-2 text-sm">
+                    <summary className="cursor-pointer text-muted-foreground">
+                      Output event ID
+                    </summary>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 rounded-xl bg-muted p-3">
+                      <code className="break-all text-xs">
+                        {outputAction.eventId}
+                      </code>
+                      <Button
+                        onClick={() => {
+                          void navigator.clipboard
+                            .writeText(outputAction.eventId)
+                            .then(() => toast.success("Output event ID copied"))
+                            .catch((error) =>
+                              toast.error(
+                                formatDaemonActionError(
+                                  "Copy output event ID",
+                                  error,
+                                ),
+                              ),
+                            );
+                        }}
+                        size="sm"
+                        variant="outline"
+                      >
+                        Copy event ID
+                      </Button>
+                    </div>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      This older record does not include a channel snapshot, so
+                      Buzz cannot focus the message directly.
+                    </p>
+                  </details>
                 ) : null}
               </div>
             );

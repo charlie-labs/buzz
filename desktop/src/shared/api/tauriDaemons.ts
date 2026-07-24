@@ -64,12 +64,25 @@ export interface DaemonBinding {
   updatedAt: string;
 }
 
+export interface DaemonBindingSnapshot {
+  bindingId: string;
+  daemonId: string;
+  agentPubkey: string;
+  relayUrl: string;
+  channelId: string;
+  contextConfigured: boolean;
+  scheduleEnabled: boolean;
+}
+
 export interface DaemonRunRecord {
   runId: string;
   bindingId: string;
   daemonId: string;
   packageHash: string | null;
   policyHash: string | null;
+  fingerprint: string;
+  wakeHash: string;
+  binding: DaemonBindingSnapshot;
   trigger: DaemonRunTrigger;
   scheduledForUtc: string | null;
   lifecycle: DaemonRunLifecycle;

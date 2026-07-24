@@ -116,6 +116,7 @@ export function useImportDaemonMutation(kind: "file" | "folder") {
 }
 
 export function useSaveDaemonBindingMutation(bindingId?: string) {
+  const queryClient = useQueryClient();
   const invalidate = useInvalidateDaemons();
   return useMutation({
     mutationFn: (
@@ -130,7 +131,12 @@ export function useSaveDaemonBindingMutation(bindingId?: string) {
         : createDaemonBinding(
             request as Parameters<typeof createDaemonBinding>[0],
           ),
-    onSettled: invalidate,
+    onSettled: async () => {
+      await Promise.all([
+        invalidate(),
+        queryClient.invalidateQueries({ queryKey: ["daemon-schedule"] }),
+      ]);
+    },
   });
 }
 

@@ -26,7 +26,7 @@ export function readinessLabel(readiness: DaemonScheduleReadiness): string {
     invalid_schedule: "Fix the schedule in DAEMON.md",
     missing_agent: "Choose a managed agent",
     relay_mismatch: "Agent is connected to a different relay",
-    channel_unavailable: "Choose an available output channel",
+    channel_unavailable: "Output channel could not be validated",
     unsupported_runtime: "Choose a supported local agent",
     agent_not_ready: "Start or repair the managed agent",
     invalid_context: "Choose an available context folder",
@@ -48,7 +48,7 @@ export function runStateLabel(
   }
   return {
     succeeded: "Succeeded",
-    no_op: "No changes",
+    no_op: "No changes needed",
     failed: "Failed",
     cancelled: "Canceled",
     interrupted: "Interrupted",
@@ -56,6 +56,39 @@ export function runStateLabel(
     skipped_overlap: "Skipped: already running",
     skipped_unready: "Skipped: setup not ready",
   }[status];
+}
+
+export type DaemonOutputAction =
+  | { kind: "view"; channelId: string; eventId: string }
+  | { kind: "event_id"; eventId: string }
+  | { kind: "none" };
+
+export function daemonOutputAction(input: {
+  status: DaemonRunStatus | null;
+  outputEventId: string | null;
+  channelId?: string | null;
+}): DaemonOutputAction {
+  if (input.status !== "succeeded" || !input.outputEventId) {
+    return { kind: "none" };
+  }
+  return input.channelId
+    ? {
+        kind: "view",
+        channelId: input.channelId,
+        eventId: input.outputEventId,
+      }
+    : { kind: "event_id", eventId: input.outputEventId };
+}
+
+export function formatDaemonActionError(
+  action: string,
+  error: unknown,
+): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  const trimmed = detail.replace(/^error:\s*/i, "").trim();
+  return trimmed
+    ? `${action} failed. ${trimmed}`
+    : `${action} failed. Try again or check that the daemon library is available.`;
 }
 
 export function formatUtcAndLocal(value: string | null): string {

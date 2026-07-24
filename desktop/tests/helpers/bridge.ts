@@ -133,6 +133,92 @@ type MockBridgeOptions = {
     purpose?: string;
     schedule?: string | null;
   } | null;
+  daemonImports?: Array<null | {
+    kind: "file" | "folder";
+    id?: string;
+    purpose?: string;
+    schedule?: string | null;
+    hasScripts?: boolean;
+    hasReferences?: boolean;
+    error?: string;
+  }>;
+  daemonPackages?: Array<{
+    id: string;
+    purpose?: string;
+    schedule?: string | null;
+    hasScripts?: boolean;
+    hasReferences?: boolean;
+  }>;
+  daemonBinding?: {
+    id?: string;
+    daemonId: string;
+    agentPubkey: string;
+    relayUrl?: string;
+    channelId: string;
+    contextConfigured?: boolean;
+    scheduleEnabled?: boolean;
+  };
+  daemonScheduleStatus?: {
+    readiness?:
+      | "ready"
+      | "disabled"
+      | "watch_only"
+      | "missing_package"
+      | "invalid_schedule"
+      | "missing_agent"
+      | "relay_mismatch"
+      | "channel_unavailable"
+      | "unsupported_runtime"
+      | "agent_not_ready"
+      | "invalid_context";
+    readinessReason?: string | null;
+    nextOccurrenceUtc?: string | null;
+    lastDecision?: {
+      kind:
+        | "ready"
+        | "executed"
+        | "missed"
+        | "skipped_overlap"
+        | "skipped_unready"
+        | "disabled"
+        | "watch_only";
+      decidedAtUtc: string;
+      scheduledForUtc?: string | null;
+      diagnostic?: string | null;
+    } | null;
+  };
+  daemonHistory?: Array<{
+    runId: string;
+    daemonId: string;
+    status:
+      | "succeeded"
+      | "no_op"
+      | "failed"
+      | "cancelled"
+      | "interrupted"
+      | "missed"
+      | "skipped_overlap"
+      | "skipped_unready";
+    trigger?: "manual" | "watch" | "schedule";
+    outputEventId?: string | null;
+    diagnostic?: string | null;
+    channelId?: string;
+  }>;
+  daemonManualRun?: {
+    status:
+      | "succeeded"
+      | "no_op"
+      | "failed"
+      | "cancelled"
+      | "interrupted"
+      | "missed"
+      | "skipped_overlap"
+      | "skipped_unready";
+    outputEventId?: string | null;
+    diagnostic?: string | null;
+  };
+  daemonExportResults?: Array<boolean | string>;
+  daemonOpenFolderResults?: Array<string | null>;
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
   /** Relay NIP-11 identity used to sign authoritative repository state. */
