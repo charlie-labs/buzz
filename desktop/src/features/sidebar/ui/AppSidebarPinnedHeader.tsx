@@ -1,4 +1,4 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import { Activity, Bot, Clock3, FolderGit2, Inbox, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -17,6 +17,7 @@ type SidebarSelectedView =
   | "channel"
   | "messages"
   | "agents"
+  | "daemons"
   | "workflows"
   | "pulse"
   | "projects";
@@ -38,6 +39,7 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
+  onSelectDaemons: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -83,6 +85,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectDaemons,
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
@@ -153,6 +156,18 @@ export function AppSidebarPrimaryMenu({
           >
             <Bot className="h-4 w-4" />
             <SidebarMenuLabel>Agents</SidebarMenuLabel>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-daemons-view"
+            isActive={selectedView === "daemons"}
+            onClick={onSelectDaemons}
+            tooltip="Daemons"
+            type="button"
+          >
+            <Clock3 className="h-4 w-4" />
+            <SidebarMenuLabel>Daemons</SidebarMenuLabel>
           </SidebarMenuButton>
         </SidebarMenuItem>
         <FeatureGate feature="workflows">

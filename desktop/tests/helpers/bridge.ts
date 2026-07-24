@@ -127,6 +127,12 @@ export type MockAgentMemoryListing = {
 };
 
 type MockBridgeOptions = {
+  /** Native daemon import picker result. Omit/null to simulate cancellation. */
+  daemonImport?: {
+    id: string;
+    purpose?: string;
+    schedule?: string | null;
+  } | null;
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
   /** Relay NIP-11 identity used to sign authoritative repository state. */

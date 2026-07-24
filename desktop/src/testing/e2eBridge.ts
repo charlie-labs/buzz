@@ -134,6 +134,12 @@ type MockSearchProfileSeed = {
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
+    /** Native daemon import picker result. Omit/null to simulate cancellation. */
+    daemonImport?: {
+      id: string;
+      purpose?: string;
+      schedule?: string | null;
+    } | null;
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
@@ -2918,6 +2924,123 @@ const mockWorkflows: MockWorkflow[] = [];
 let mockWorkflowRuns: RawWorkflowRun[] = [];
 let mockWorkflowIdCounter = 0;
 
+type MockDaemonPackage = {
+  id: string;
+  purpose: string;
+  activationMode: "watch_only" | "schedule_only" | "hybrid";
+  packageHash: string;
+  watchCount: number;
+  routineCount: number;
+  hasScripts: boolean;
+  hasReferences: boolean;
+  daemonMd: string;
+  schedule: string | null;
+};
+
+type MockDaemonBinding = {
+  id: string;
+  daemonId: string;
+  agentPubkey: string;
+  relayUrl: string;
+  channelId: string;
+  contextConfigured: boolean;
+  scheduleEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type MockDaemonRun = {
+  recordType: "managed";
+  runId: string;
+  bindingId: string;
+  daemonId: string;
+  packageHash: string | null;
+  policyHash: string | null;
+  trigger: "manual" | "watch" | "schedule";
+  scheduledForUtc: string | null;
+  lifecycle: "reserved" | "running" | "publishing" | "terminal";
+  status:
+    | "succeeded"
+    | "failed"
+    | "cancelled"
+    | "interrupted"
+    | "missed"
+    | "skipped_overlap"
+    | "skipped_unready"
+    | null;
+  reservedAt: string;
+  startedAt: string | null;
+  publishingAt: string | null;
+  completedAt: string | null;
+  acpSessionId: string | null;
+  outputEventId: string | null;
+  diagnostic: string | null;
+};
+
+let mockDaemonPackages: MockDaemonPackage[] = [];
+let mockDaemonBindings: MockDaemonBinding[] = [];
+let mockDaemonRuns: MockDaemonRun[] = [];
+
+function parseMockDaemonMd(daemonMd: string): MockDaemonPackage {
+  const match = daemonMd.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]+)$/);
+  if (!match)
+    throw new Error(
+      "DAEMON.md needs YAML frontmatter and a non-empty Markdown body.",
+    );
+  const parsed = yamlParse(match[1] ?? "") as Record<string, unknown>;
+  const id = typeof parsed.id === "string" ? parsed.id.trim() : "";
+  const purpose =
+    typeof parsed.purpose === "string" ? parsed.purpose.trim() : "";
+  const watch = Array.isArray(parsed.watch)
+    ? parsed.watch.filter((item) => typeof item === "string" && item.trim())
+    : [];
+  const routines = Array.isArray(parsed.routines)
+    ? parsed.routines.filter((item) => typeof item === "string" && item.trim())
+    : [];
+  const schedule =
+    typeof parsed.schedule === "string" && parsed.schedule.trim()
+      ? parsed.schedule.trim()
+      : null;
+  if (
+    !id ||
+    !purpose ||
+    routines.length === 0 ||
+    (!schedule && watch.length === 0)
+  ) {
+    throw new Error(
+      "DAEMON.md requires id, purpose, routines, and at least one of watch or schedule.",
+    );
+  }
+  return {
+    id,
+    purpose,
+    activationMode:
+      schedule && watch.length
+        ? "hybrid"
+        : schedule
+          ? "schedule_only"
+          : "watch_only",
+    packageHash: `mock-${id}-${daemonMd.length}`,
+    watchCount: watch.length,
+    routineCount: routines.length,
+    hasScripts: false,
+    hasReferences: false,
+    daemonMd,
+    schedule,
+  };
+}
+
+function resetMockDaemons() {
+  mockDaemonPackages = [];
+  mockDaemonBindings = [];
+  mockDaemonRuns = [];
+}
+
+function daemonSummary(daemon: MockDaemonPackage) {
+  const { daemonMd: _daemonMd, schedule: _schedule, ...summary } = daemon;
+  return summary;
+}
+
 function resetMockWorkflows() {
   mockWorkflows.length = 0;
   mockWorkflowRuns = [];
@@ -3098,6 +3221,188 @@ function handleGetWorkflowRuns(args: {
 
 function handleGetRunApprovals(_args: { workflowId: string; runId: string }) {
   return [];
+}
+
+function handleListDaemonPackages() {
+  return mockDaemonPackages.map(daemonSummary);
+}
+
+function handleGetDaemonPackage(args: { daemonId: string }) {
+  const daemon = mockDaemonPackages.find((item) => item.id === args.daemonId);
+  if (!daemon) throw new Error(`Daemon ${args.daemonId} was not found.`);
+  const { schedule: _schedule, ...detail } = daemon;
+  return detail;
+}
+
+function handleCreateDaemonPackage(args: { request: { daemonMd: string } }) {
+  const daemon = parseMockDaemonMd(args.request.daemonMd);
+  if (mockDaemonPackages.some((item) => item.id === daemon.id)) {
+    throw new Error(
+      `Daemon ${daemon.id} already exists. Choose a different ID or explicitly replace it during import.`,
+    );
+  }
+  mockDaemonPackages = [...mockDaemonPackages, daemon];
+  return daemonSummary(daemon);
+}
+
+function handleUpdateDaemonPackage(args: {
+  request: { daemonId: string; daemonMd: string };
+}) {
+  const index = mockDaemonPackages.findIndex(
+    (item) => item.id === args.request.daemonId,
+  );
+  if (index === -1)
+    throw new Error(`Daemon ${args.request.daemonId} was not found.`);
+  const daemon = parseMockDaemonMd(args.request.daemonMd);
+  if (daemon.id !== args.request.daemonId)
+    throw new Error(
+      "The DAEMON.md id must continue to match its package folder.",
+    );
+  mockDaemonPackages = mockDaemonPackages.map((item, itemIndex) =>
+    itemIndex === index ? daemon : item,
+  );
+  return daemonSummary(daemon);
+}
+
+function handleImportDaemon(args: { replace: boolean }, config?: E2eConfig) {
+  const seed = config?.mock?.daemonImport;
+  if (!seed) return null;
+  const daemonMd = `---\nid: ${seed.id}\npurpose: ${seed.purpose ?? "Imported daemon"}\nroutines:\n  - Review the current target and report concise findings.\ndeny:\n  - Do not take destructive action.\n${seed.schedule ? `schedule: "${seed.schedule}"\n` : "watch:\n  - A relevant event is routed to this daemon.\n"}---\n\n## Decision policy\n\nAct only with current context.\n`;
+  const daemon = parseMockDaemonMd(daemonMd);
+  const existing = mockDaemonPackages.findIndex(
+    (item) => item.id === daemon.id,
+  );
+  if (existing >= 0 && !args.replace)
+    throw new Error(
+      `Daemon ${daemon.id} already exists. Retry with Replace only if you intend to overwrite it.`,
+    );
+  if (existing >= 0)
+    mockDaemonPackages = mockDaemonPackages.map((item, itemIndex) =>
+      itemIndex === existing ? daemon : item,
+    );
+  else mockDaemonPackages = [...mockDaemonPackages, daemon];
+  return daemonSummary(daemon);
+}
+
+function handleCreateDaemonBinding(args: {
+  request: Omit<
+    MockDaemonBinding,
+    "id" | "createdAt" | "updatedAt" | "contextConfigured"
+  > & { contextDirectory?: string | null };
+}) {
+  if (
+    mockDaemonBindings.some((item) => item.daemonId === args.request.daemonId)
+  )
+    throw new Error("This daemon already has a primary binding.");
+  const now = new Date().toISOString();
+  const binding: MockDaemonBinding = {
+    id: crypto.randomUUID(),
+    daemonId: args.request.daemonId,
+    agentPubkey: args.request.agentPubkey,
+    relayUrl: args.request.relayUrl,
+    channelId: args.request.channelId,
+    contextConfigured: Boolean(args.request.contextDirectory),
+    scheduleEnabled: args.request.scheduleEnabled,
+    createdAt: now,
+    updatedAt: now,
+  };
+  mockDaemonBindings = [...mockDaemonBindings, binding];
+  return binding;
+}
+
+function handleUpdateDaemonBinding(args: {
+  request: {
+    id: string;
+    agentPubkey?: string;
+    relayUrl?: string;
+    channelId?: string;
+    contextDirectory?: string | null;
+    scheduleEnabled?: boolean;
+  };
+}) {
+  const existing = mockDaemonBindings.find(
+    (item) => item.id === args.request.id,
+  );
+  if (!existing) throw new Error("Daemon binding was not found.");
+  const binding = { ...existing };
+  if (args.request.agentPubkey !== undefined)
+    binding.agentPubkey = args.request.agentPubkey;
+  if (args.request.relayUrl !== undefined)
+    binding.relayUrl = args.request.relayUrl;
+  if (args.request.channelId !== undefined)
+    binding.channelId = args.request.channelId;
+  if (args.request.contextDirectory !== undefined)
+    binding.contextConfigured = Boolean(args.request.contextDirectory);
+  if (args.request.scheduleEnabled !== undefined)
+    binding.scheduleEnabled = args.request.scheduleEnabled;
+  binding.updatedAt = new Date().toISOString();
+  mockDaemonBindings = mockDaemonBindings.map((item) =>
+    item.id === binding.id ? binding : item,
+  );
+  return binding;
+}
+
+function handleGetDaemonScheduleStatus(args: { bindingId: string }) {
+  const binding = mockDaemonBindings.find((item) => item.id === args.bindingId);
+  if (!binding) throw new Error("Daemon binding was not found.");
+  const daemon = mockDaemonPackages.find(
+    (item) => item.id === binding.daemonId,
+  );
+  const next = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  return {
+    bindingId: binding.id,
+    schedule: daemon?.schedule ?? null,
+    scheduleHash: daemon?.schedule ? `mock-${daemon.schedule}` : null,
+    readiness: !daemon?.schedule
+      ? "watch_only"
+      : binding.scheduleEnabled
+        ? "ready"
+        : "disabled",
+    readinessReason: null,
+    nextOccurrenceUtc:
+      daemon?.schedule && binding.scheduleEnabled ? next : null,
+    lastDecision: null,
+  };
+}
+
+function handleRunManagedDaemon(args: {
+  request: {
+    runId: string;
+    bindingId: string;
+    wakeInstruction: string;
+    trigger?: "manual" | "watch" | "schedule";
+    scheduledForUtc?: string;
+  };
+}) {
+  const binding = mockDaemonBindings.find(
+    (item) => item.id === args.request.bindingId,
+  );
+  if (!binding) throw new Error("Complete daemon setup before running it.");
+  const now = new Date().toISOString();
+  const completed = new Date(Date.now() + 1_200).toISOString();
+  const record: MockDaemonRun = {
+    recordType: "managed",
+    runId: args.request.runId,
+    bindingId: binding.id,
+    daemonId: binding.daemonId,
+    packageHash:
+      mockDaemonPackages.find((item) => item.id === binding.daemonId)
+        ?.packageHash ?? null,
+    policyHash: "mock-policy",
+    trigger: args.request.trigger ?? "manual",
+    scheduledForUtc: args.request.scheduledForUtc ?? null,
+    lifecycle: "terminal",
+    status: "succeeded",
+    reservedAt: now,
+    startedAt: now,
+    publishingAt: completed,
+    completedAt: completed,
+    acpSessionId: `mock-session-${args.request.runId}`,
+    outputEventId: `mock-output-${args.request.runId}`,
+    diagnostic: null,
+  };
+  mockDaemonRuns = [record, ...mockDaemonRuns];
+  return record;
 }
 
 const mockProfiles = new Map<string, RawProfile>([
@@ -8950,6 +9255,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockTeams(config);
   seedMockSearchProfiles(config);
   resetMockWorkflows();
+  resetMockDaemons();
   resetMockMesh();
   resetMockUserStatuses();
   resetMockSaveSubscriptions(config);
@@ -10795,6 +11101,89 @@ export function maybeInstallE2eTauriMocks() {
         return handleGetRunApprovals(
           payload as Parameters<typeof handleGetRunApprovals>[0],
         );
+      case "list_daemon_packages":
+        return handleListDaemonPackages();
+      case "get_daemon_package":
+        return handleGetDaemonPackage(
+          payload as Parameters<typeof handleGetDaemonPackage>[0],
+        );
+      case "create_daemon_package":
+        return handleCreateDaemonPackage(
+          payload as Parameters<typeof handleCreateDaemonPackage>[0],
+        );
+      case "update_daemon_package":
+        return handleUpdateDaemonPackage(
+          payload as Parameters<typeof handleUpdateDaemonPackage>[0],
+        );
+      case "pick_and_import_daemon_md":
+      case "pick_and_import_daemon_folder":
+        return handleImportDaemon(
+          payload as Parameters<typeof handleImportDaemon>[0],
+          activeConfig,
+        );
+      case "pick_daemon_context_folder":
+        return "/Users/dev/daemon-context";
+      case "export_daemon_package_with_picker":
+        return true;
+      case "open_daemon_library_folder":
+        return null;
+      case "delete_daemon_package": {
+        const { daemonId } = payload as { daemonId: string };
+        if (mockDaemonBindings.some((item) => item.daemonId === daemonId))
+          throw new Error(
+            "Remove the daemon binding before deleting its package.",
+          );
+        mockDaemonPackages = mockDaemonPackages.filter(
+          (item) => item.id !== daemonId,
+        );
+        return null;
+      }
+      case "list_daemon_bindings":
+        return mockDaemonBindings;
+      case "get_daemon_binding": {
+        const binding = mockDaemonBindings.find(
+          (item) => item.id === (payload as { bindingId: string }).bindingId,
+        );
+        if (!binding) throw new Error("Daemon binding was not found.");
+        return binding;
+      }
+      case "create_daemon_binding":
+        return handleCreateDaemonBinding(
+          payload as Parameters<typeof handleCreateDaemonBinding>[0],
+        );
+      case "update_daemon_binding":
+        return handleUpdateDaemonBinding(
+          payload as Parameters<typeof handleUpdateDaemonBinding>[0],
+        );
+      case "delete_daemon_binding":
+        mockDaemonBindings = mockDaemonBindings.filter(
+          (item) => item.id !== (payload as { bindingId: string }).bindingId,
+        );
+        return null;
+      case "get_daemon_schedule_status":
+        return handleGetDaemonScheduleStatus(
+          payload as Parameters<typeof handleGetDaemonScheduleStatus>[0],
+        );
+      case "run_managed_daemon":
+        return handleRunManagedDaemon(
+          payload as Parameters<typeof handleRunManagedDaemon>[0],
+        );
+      case "cancel_managed_daemon": {
+        const runId = (payload as { runId: string }).runId;
+        mockDaemonRuns = mockDaemonRuns.map((item) =>
+          item.runId === runId
+            ? {
+                ...item,
+                lifecycle: "terminal",
+                status: "cancelled",
+                completedAt: new Date().toISOString(),
+              }
+            : item,
+        );
+        return null;
+      }
+      case "list_daemon_run_history":
+        return mockDaemonRuns;
       case "plugin:webview|set_webview_zoom":
         window.__BUZZ_E2E_WEBVIEW_ZOOM__ = (payload as { value: number }).value;
         return;

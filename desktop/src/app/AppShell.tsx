@@ -124,6 +124,7 @@ export function AppShell() {
   useManagedAgentRuntimeReconciliation(communitiesHook.communities); // sync storage snapshot
   const {
     goAgents,
+    goDaemons,
     goChannel,
     goHome,
     goNewMessage,
@@ -872,6 +873,7 @@ export function AppShell() {
                             await goChannel(directMessage.id);
                           }}
                           onSelectAgents={() => void goAgents()}
+                          onSelectDaemons={() => void goDaemons()}
                           onSelectChannel={(channelId) =>
                             void goChannel(channelId)
                           }

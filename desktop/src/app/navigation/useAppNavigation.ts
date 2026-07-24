@@ -68,6 +68,24 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goDaemons = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation({ to: "/daemons" }, behavior),
+    [commitNavigation],
+  );
+
+  const goDaemon = React.useCallback(
+    (daemonId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/daemons/$daemonId",
+          params: { daemonId },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goPulse = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -296,6 +314,8 @@ export function useAppNavigation() {
     closeSettings,
     closeWorkflowDetail,
     goAgents,
+    goDaemon,
+    goDaemons,
     goChannel,
     goForumPost,
     goHome,
