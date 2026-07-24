@@ -122,9 +122,9 @@ test("folder import preserves scripts and references package indicators", async 
   await page.getByRole("button", { name: "Import folder" }).first().click();
 
   await expect(page).toHaveURL(/#\/daemons\/package-import$/);
-  const contents = page.getByLabel("Package contents");
-  await expect(contents.getByText("Scripts", { exact: true })).toBeVisible();
-  await expect(contents.getByText("References", { exact: true })).toBeVisible();
+  const contents = page.getByRole("group", { name: "Package contents" });
+  await expect(contents).toContainText("Scripts");
+  await expect(contents).toContainText("References");
 });
 
 test("malformed import reports a useful error without creating a package", async ({
