@@ -37,6 +37,7 @@ futures-util = { workspace = true }
 
 # HTTP (channel discovery REST API)
 reqwest = { workspace = true }
+axum = "0.8"
 
 # Serialization
 serde = { workspace = true }
@@ -61,6 +62,7 @@ tracing-subscriber = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+subtle = { workspace = true }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -79,3 +81,4 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"
+tempfile = "3"

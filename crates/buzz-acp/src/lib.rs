@@ -2,6 +2,7 @@
 
 mod acp;
 mod config;
+mod daemon_control;
 mod engram_fetch;
 mod filter;
 mod observer;
@@ -1293,6 +1294,10 @@ async fn tokio_main() -> Result<()> {
         tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
         return setup_mode::run_setup_listener(config, payload).await;
     }
+
+    daemon_control::start(&config)
+        .await
+        .map_err(|error| anyhow::anyhow!("daemon control startup failed: {error}"))?;
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 

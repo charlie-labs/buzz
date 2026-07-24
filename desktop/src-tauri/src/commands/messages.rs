@@ -725,6 +725,34 @@ pub async fn send_managed_agent_channel_message(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
+    send_managed_agent_channel_message_inner(
+        agent_pubkey,
+        channel_id,
+        content,
+        marker,
+        marker_scope,
+        mention_pubkeys,
+        parent_event_id,
+        additional_markers,
+        &app,
+        &state,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_managed_agent_channel_message_inner(
+    agent_pubkey: String,
+    channel_id: String,
+    content: String,
+    marker: Option<String>,
+    marker_scope: Option<String>,
+    mention_pubkeys: Option<Vec<String>>,
+    parent_event_id: Option<String>,
+    additional_markers: Option<Vec<String>>,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
     let trimmed = content.trim();
@@ -743,7 +771,7 @@ pub async fn send_managed_agent_channel_message(
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
-        let mut records = load_managed_agents(&app)?;
+        let mut records = load_managed_agents(app)?;
         find_managed_agent_mut(&mut records, &requested_pubkey)?.clone()
     };
 
@@ -765,7 +793,7 @@ pub async fn send_managed_agent_channel_message(
 
     if let Some(marker) = marker.as_deref() {
         if let Some(existing) = find_managed_agent_channel_message_by_marker(
-            &state,
+            state,
             marker_author_for_scope(marker_scope.as_deref(), Some(&record.pubkey))?,
             &channel_id,
             marker,
@@ -805,7 +833,7 @@ pub async fn send_managed_agent_channel_message(
         &client_tags,
     )?;
     let result =
-        submit_event_with_keys(builder, &state, &keys, submission_auth_tag.as_deref()).await?;
+        submit_event_with_keys(builder, state, &keys, submission_auth_tag.as_deref()).await?;
 
     Ok(SendChannelMessageResponse {
         event_id: result.event_id,

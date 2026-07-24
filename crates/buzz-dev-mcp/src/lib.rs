@@ -10,6 +10,7 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod daemon_completion;
 mod paths;
 mod read_file;
 mod rg;
@@ -175,6 +176,12 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
+
+    if let Some(server) = daemon_completion::DaemonCompletionMcp::from_env() {
+        let service = server.serve(stdio()).await?;
+        service.waiting().await?;
+        return Ok(());
+    }
 
     let cwd = std::env::current_dir()?;
     let shim = shim::Shim::install()?;

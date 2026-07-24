@@ -200,6 +200,10 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Whether raw JSON-RPC payloads may be written to debug logs. Daemon
+    /// activations disable this because their policy, wake context, and model
+    /// output are intentionally not loggable.
+    wire_payload_logging: bool,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -460,6 +464,12 @@ impl AcpClient {
             cmd.env("CODEX_CONFIG", merged);
         }
 
+        // The desktop-to-harness control bearer belongs only to this buzz-acp
+        // process. Provider/agent children must never inherit it (or the
+        // readiness path that identifies the control endpoint).
+        cmd.env_remove("BUZZ_ACP_CONTROL_TOKEN");
+        cmd.env_remove("BUZZ_ACP_CONTROL_READY_FILE");
+
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).
@@ -496,7 +506,13 @@ impl AcpClient {
             active_run_id: None,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            wire_payload_logging: true,
         })
+    }
+
+    /// Disable raw ACP request/response payload logging for sensitive sessions.
+    pub fn disable_wire_payload_logging(&mut self) {
+        self.wire_payload_logging = false;
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -700,7 +716,11 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        if self.wire_payload_logging {
+            tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        } else {
+            tracing::debug!(target: "acp::wire", "→ session/prompt [payload redacted]");
+        }
         if let Err(e) = self.write_ndjson(&msg).await {
             self.last_prompt_id = None;
             self.current_hard_deadline = None;
@@ -991,7 +1011,11 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        if self.wire_payload_logging {
+            tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        } else {
+            tracing::debug!(target: "acp::wire", "→ {method} [payload redacted]");
+        }
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -1056,7 +1080,11 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ (notification) {}", &serde_json::to_string(&msg).unwrap_or_default());
+        if self.wire_payload_logging {
+            tracing::debug!(target: "acp::wire", "→ (notification) {}", &serde_json::to_string(&msg).unwrap_or_default());
+        } else {
+            tracing::debug!(target: "acp::wire", "→ {method} notification [payload redacted]");
+        }
         self.write_ndjson(&msg).await?;
         Ok(())
     }
@@ -1098,7 +1126,11 @@ impl AcpClient {
             }
 
             // Only log and reset idle after we have a valid non-empty line.
-            tracing::debug!(target: "acp::wire", "← {trimmed}");
+            if self.wire_payload_logging {
+                tracing::debug!(target: "acp::wire", "← {trimmed}");
+            } else {
+                tracing::debug!(target: "acp::wire", "← ACP message [payload redacted]");
+            }
 
             let msg: serde_json::Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
@@ -1106,7 +1138,7 @@ impl AcpClient {
                     self.observe(
                         "acp_parse_error",
                         serde_json::json!({
-                            "line": trimmed,
+                            "line": if self.wire_payload_logging { trimmed } else { "[redacted]" },
                             "error": e.to_string(),
                         }),
                     );
@@ -1313,11 +1345,18 @@ impl AcpClient {
                                 "method": "_goose/unstable/session/steer",
                                 "params": params,
                             });
-                            tracing::debug!(
-                                target: "acp::wire",
-                                "→ {}",
-                                serde_json::to_string(&msg).unwrap_or_default()
-                            );
+                            if self.wire_payload_logging {
+                                tracing::debug!(
+                                    target: "acp::wire",
+                                    "→ {}",
+                                    serde_json::to_string(&msg).unwrap_or_default()
+                                );
+                            } else {
+                                tracing::debug!(
+                                    target: "acp::wire",
+                                    "→ session/steer [payload redacted]"
+                                );
+                            }
                             match self.write_ndjson(&msg).await {
                                 Ok(()) => {
                                     pending_steer = Some((id, req.ack_tx));
@@ -1392,7 +1431,11 @@ impl AcpClient {
                         continue;
                     }
 
-                    tracing::debug!(target: "acp::wire", "← {trimmed}");
+                    if self.wire_payload_logging {
+                        tracing::debug!(target: "acp::wire", "← {trimmed}");
+                    } else {
+                        tracing::debug!(target: "acp::wire", "← ACP message [payload redacted]");
+                    }
 
                     let msg: serde_json::Value = match serde_json::from_str(trimmed) {
                         Ok(v) => v,
@@ -1400,7 +1443,7 @@ impl AcpClient {
                             self.observe(
                                 "acp_parse_error",
                                 serde_json::json!({
-                                    "line": trimmed,
+                                    "line": if self.wire_payload_logging { trimmed } else { "[redacted]" },
                                     "error": e.to_string(),
                                 }),
                             );

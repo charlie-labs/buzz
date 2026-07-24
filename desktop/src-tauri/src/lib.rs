@@ -50,7 +50,7 @@ use managed_agents::{
     backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
     put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
     restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
-    try_regenerate_nest,
+    try_regenerate_nest, run_managed_daemon, cancel_managed_daemon,
 };
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
@@ -737,6 +737,8 @@ pub fn run() {
             search_messages,
             send_channel_message,
             send_managed_agent_channel_message,
+            run_managed_daemon,
+            cancel_managed_daemon,
             has_managed_agent_channel_message_marker,
             get_forum_posts,
             get_forum_thread,

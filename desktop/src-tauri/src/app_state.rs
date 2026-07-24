@@ -47,6 +47,8 @@ pub struct AppState {
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
+    /// Active daemon activations, keyed by caller-provided run UUID.
+    pub daemon_run_cancellations: Mutex<HashMap<uuid::Uuid, tokio_util::sync::CancellationToken>>,
     pub huddle_state: Mutex<HuddleState>,
     /// Tauri app handle — stored after setup so huddle commands can emit
     /// `huddle-state-changed` events without needing the handle threaded
@@ -209,6 +211,7 @@ pub fn build_app_state() -> AppState {
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
+        daemon_run_cancellations: Mutex::new(HashMap::new()),
         session_config_cache: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
         app_handle: Mutex::new(None),

@@ -443,6 +443,11 @@ pub struct ManagedAgentProcess {
     pub adapter_availability: Option<AcpAvailabilityStatus>,
     /// Unpredictable identity shared only with this harness generation.
     pub start_nonce: String,
+    /// Per-process bearer used only for the loopback daemon control plane.
+    /// Runtime-only and never logged or persisted.
+    pub daemon_control_token: String,
+    /// Child-written readiness file containing the loopback endpoint (never the token).
+    pub daemon_control_ready_file: PathBuf,
     /// Win32 Job Object owning the harness + its entire process tree. Closing
     /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
     /// tree — the Windows mirror of the Unix process-group teardown. `None`
