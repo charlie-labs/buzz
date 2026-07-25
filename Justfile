@@ -83,9 +83,10 @@ logs *ARGS:
 
 # ─── Build & Check ───────────────────────────────────────────────────────────
 
-# Build the Rust workspace
-build:
+# Build the Rust workspace and stage runnable debug sidecars for Tauri
+build: _ensure-sidecar-stubs
     cargo build --workspace
+    SIDECAR_PROFILE=debug ./scripts/bundle-sidecars.sh
 
 # Build the Rust workspace in release mode
 build-release:
@@ -429,6 +430,7 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
         done
     fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
+    SIDECAR_PROFILE=debug ./scripts/bundle-sidecars.sh
     if [[ -n "{{mesh}}" ]]; then
         export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
@@ -476,12 +478,7 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
-    TARGET=$(rustc -vV | sed -n 's|host: ||p')
-    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
-        cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
-        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
-    done
+    SIDECAR_PROFILE=debug ./scripts/bundle-sidecars.sh
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     unset BUZZ_PRIVATE_KEY BUZZ_SHARE_IDENTITY
@@ -510,11 +507,7 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
         FEATURES=(--features mesh-llm)
         export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
-    # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
-    TARGET=$(rustc -vV | sed -n 's|host: ||p')
-    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
-    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
+    ./scripts/bundle-sidecars.sh
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
     source ../scripts/instance-env.sh
@@ -537,11 +530,7 @@ production *ARGS: bootstrap _ensure-sidecar-stubs
         FEATURES=(--features mesh-llm)
         export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
-    # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
-    TARGET=$(rustc -vV | sed -n 's|host: ||p')
-    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
-    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
+    ./scripts/bundle-sidecars.sh
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://buzz.block.builderlab.xyz"
     source ../scripts/instance-env.sh

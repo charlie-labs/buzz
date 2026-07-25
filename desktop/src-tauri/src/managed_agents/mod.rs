@@ -50,6 +50,7 @@ pub use backend::*;
 pub use daemon::*;
 pub use daemon_library::*;
 pub(crate) use daemon_runtime::*;
+pub(crate) use discovery::is_executable_file;
 pub use discovery::*;
 pub use env_vars::*;
 #[cfg(windows)]

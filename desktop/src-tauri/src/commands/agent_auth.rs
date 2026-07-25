@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -11,7 +11,8 @@ use serde_json::Value;
 use serde::{Deserialize, Serialize};
 
 use crate::managed_agents::{
-    default_agent_workdir, known_acp_runtime_exact, normalize_agent_args, resolve_command,
+    default_agent_workdir, is_executable_file, known_acp_runtime_exact, normalize_agent_args,
+    resolve_command,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,12 +120,10 @@ fn run_buzz_acp_auth_command<const N: usize>(
         .find_map(|command| resolve_command(command).map(|path| (*command, path)))
         .ok_or_else(|| format!("{} ACP adapter is not installed", runtime.label))?;
 
-    let acp_path = std::env::current_exe()
+    let sibling_acp_path = std::env::current_exe()
         .map(|path| path.with_file_name(format!("buzz-acp{}", std::env::consts::EXE_SUFFIX)))
-        .ok()
-        .filter(|path| path.exists())
-        .or_else(|| resolve_command("buzz-acp"))
-        .ok_or_else(|| "buzz-acp helper not found".to_string())?;
+        .map_err(|error| format!("failed to locate the bundled buzz-acp helper: {error}"))?;
+    let acp_path = select_buzz_acp_auth_helper(&sibling_acp_path, || resolve_command("buzz-acp"))?;
 
     let augmented_path = auth_command_path();
     run_buzz_acp_auth_command_with_paths(
@@ -134,6 +133,24 @@ fn run_buzz_acp_auth_command<const N: usize>(
         args,
         augmented_path.as_deref(),
     )
+}
+
+fn select_buzz_acp_auth_helper<F>(sibling_path: &Path, path_fallback: F) -> Result<PathBuf, String>
+where
+    F: FnOnce() -> Option<PathBuf>,
+{
+    match sibling_path.try_exists() {
+        Ok(true) if is_executable_file(sibling_path) => Ok(sibling_path.to_path_buf()),
+        Ok(true) => Err(format!(
+            "bundled buzz-acp helper at {} is not executable or is invalid; reinstall or rebuild Buzz to restore the helper",
+            sibling_path.display()
+        )),
+        Ok(false) => path_fallback().ok_or_else(|| "buzz-acp helper not found".to_string()),
+        Err(error) => Err(format!(
+            "bundled buzz-acp helper at {} is not executable or is invalid: {error}",
+            sibling_path.display()
+        )),
+    }
 }
 
 /// PATH for the buzz-acp auth helper child process.
@@ -462,9 +479,78 @@ fn shell_escape(arg: &str) -> String {
 mod tests {
     use super::{
         adapter_terminal_argv, append_inherited_path, is_claude_subscription_login,
-        run_buzz_acp_auth_command_with_paths, shell_escape, shell_join, uses_terminal_auth,
-        windows_terminal_args, AcpAuthMethod,
+        run_buzz_acp_auth_command_with_paths, select_buzz_acp_auth_helper, shell_escape,
+        shell_join, uses_terminal_auth, windows_terminal_args, AcpAuthMethod,
     };
+
+    #[test]
+    fn executable_sibling_auth_helper_wins_over_path_fallback() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let sibling = temp
+            .path()
+            .join(format!("buzz-acp{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&sibling, b"helper").expect("write sibling helper");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod sibling helper");
+        }
+        let fallback = temp.path().join("path-buzz-acp");
+
+        assert_eq!(
+            select_buzz_acp_auth_helper(&sibling, || Some(fallback)).expect("select helper"),
+            sibling
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_executable_sibling_auth_helper_fails_without_path_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let sibling = temp.path().join("buzz-acp");
+        std::fs::write(&sibling, b"helper").expect("write sibling helper");
+        std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod sibling helper");
+        let fallback = temp.path().join("path-buzz-acp");
+
+        let error = select_buzz_acp_auth_helper(&sibling, || Some(fallback))
+            .expect_err("invalid sibling must fail closed");
+        assert!(error.contains(&sibling.display().to_string()));
+        assert!(error.contains("not executable or is invalid"));
+    }
+
+    #[test]
+    fn missing_sibling_auth_helper_uses_path_fallback() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let sibling = temp
+            .path()
+            .join(format!("buzz-acp{}", std::env::consts::EXE_SUFFIX));
+        let fallback = temp.path().join("path-buzz-acp");
+
+        assert_eq!(
+            select_buzz_acp_auth_helper(&sibling, || Some(fallback.clone()))
+                .expect("select fallback"),
+            fallback
+        );
+    }
+
+    #[test]
+    fn directory_sibling_auth_helper_fails_without_path_fallback() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let sibling = temp
+            .path()
+            .join(format!("buzz-acp{}", std::env::consts::EXE_SUFFIX));
+        std::fs::create_dir(&sibling).expect("create sibling directory");
+        let fallback = temp.path().join("path-buzz-acp");
+
+        let error = select_buzz_acp_auth_helper(&sibling, || Some(fallback))
+            .expect_err("directory sibling must fail closed");
+        assert!(error.contains(&sibling.display().to_string()));
+        assert!(error.contains("not executable or is invalid"));
+    }
 
     /// Windows regression: the augmented PATH there holds only Buzz-managed
     /// dirs and the exe parent (no login-shell PATH, no managed Node), so the
