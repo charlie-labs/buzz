@@ -220,14 +220,7 @@ async fn run_managed_daemon_inner(
         } else {
             DaemonRunStatus::Failed
         };
-        terminalize_safely(
-            app,
-            state,
-            record,
-            status,
-            None,
-            Some(&error),
-        )?;
+        terminalize_safely(app, state, record, status, None, Some(&error))?;
         return Ok(record.clone());
     }
     let key = ManagedAgentRuntimeKey::new(binding.agent_pubkey.clone(), &binding.relay_url)?;
@@ -457,12 +450,7 @@ pub fn cancel_managed_daemon(run_id: String, app: AppHandle) -> Result<(), Strin
 }
 
 pub(crate) fn cancel_all_daemon_runs(app: &AppHandle) {
-    if let Ok(active) = app
-        .state::<AppState>()
-        .daemon_runtime
-        .cancellations
-        .lock()
-    {
+    if let Ok(active) = app.state::<AppState>().daemon_runtime.cancellations.lock() {
         for cancellation in active.values() {
             cancellation.cancel();
         }
@@ -510,10 +498,7 @@ fn validate_daemon_output_channel_scope(
         binding.agent_pubkey.clone(),
         &crate::relay::relay_ws_url_with_override(state),
     )?;
-    let configured = ManagedAgentRuntimeKey::new(
-        binding.agent_pubkey.clone(),
-        &binding.relay_url,
-    )?;
+    let configured = ManagedAgentRuntimeKey::new(binding.agent_pubkey.clone(), &binding.relay_url)?;
     if active.relay_url != configured.relay_url {
         return Err(
             "output channel belongs to a different relay; choose a channel in the active community"
@@ -577,7 +562,9 @@ fn validate_daemon_output_channel_events(
     let members = events
         .iter()
         .find(|event| event.kind.as_u16() == 39002)
-        .ok_or_else(|| "output channel membership is unavailable for the managed agent".to_string())?;
+        .ok_or_else(|| {
+            "output channel membership is unavailable for the managed agent".to_string()
+        })?;
     let membership = crate::nostr_convert::channel_members_from_event(members)
         .map_err(|error| format!("output channel membership is invalid: {error}"))?;
     if !membership
@@ -597,22 +584,35 @@ fn resolve_ready_agent_record(
     app: &AppHandle,
     record: &super::ManagedAgentRecord,
 ) -> Result<(), String> {
-    if record.backend != BackendKind::Local {
-        return Err("daemon runs require a local managed agent".into());
-    }
     let personas = load_personas(app).unwrap_or_default();
-    let global = load_global_agent_config(app).unwrap_or_default();
     let command = record_agent_command(record, &personas);
-    if known_acp_runtime(&command)
-        .and_then(|runtime| runtime.mcp_command)
-        .is_none()
-    {
-        return Err("selected managed agent runtime does not support daemon completion".into());
-    }
+    validate_daemon_agent_capability(&record.backend, &command)?;
+    let global = load_global_agent_config(app).unwrap_or_default();
     let effective =
         resolve_effective_agent_env(record, &personas, known_acp_runtime(&command), &global);
     if !matches!(agent_readiness(&effective), AgentReadiness::Ready) {
         return Err("managed agent is not ready".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_daemon_agent_record_capability(
+    app: &AppHandle,
+    record: &super::ManagedAgentRecord,
+) -> Result<(), String> {
+    let personas = load_personas(app).unwrap_or_default();
+    validate_daemon_agent_capability(&record.backend, &record_agent_command(record, &personas))
+}
+
+fn validate_daemon_agent_capability(backend: &BackendKind, command: &str) -> Result<(), String> {
+    if backend != &BackendKind::Local {
+        return Err("daemon runs require a local managed agent".into());
+    }
+    if known_acp_runtime(command)
+        .and_then(|runtime| runtime.mcp_command)
+        .is_none()
+    {
+        return Err("selected managed agent runtime does not support daemon completion".into());
     }
     Ok(())
 }
@@ -782,6 +782,26 @@ mod tests {
     fn publication_marker_is_stable() {
         let run_id = Uuid::new_v4();
         assert_eq!(daemon_run_marker(run_id), format!("daemon-run:{run_id}"));
+    }
+
+    #[test]
+    fn daemon_setup_rejects_unsupported_runtime_without_checking_transient_readiness() {
+        assert!(
+            validate_daemon_agent_capability(&BackendKind::Local, "goose")
+                .unwrap_err()
+                .contains("does not support daemon completion")
+        );
+        assert!(validate_daemon_agent_capability(&BackendKind::Local, "buzz-agent").is_ok());
+        assert!(validate_daemon_agent_capability(&BackendKind::Local, "codex-acp").is_ok());
+        assert!(validate_daemon_agent_capability(
+            &BackendKind::Provider {
+                id: "remote".into(),
+                config: serde_json::Value::Null,
+            },
+            "buzz-agent",
+        )
+        .unwrap_err()
+        .contains("local managed agent"));
     }
 
     #[test]

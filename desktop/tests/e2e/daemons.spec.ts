@@ -250,6 +250,49 @@ test("channel-unavailable readiness explains active relay validation", async ({
   );
 });
 
+test("unsupported runtime disables Run now and preserves the backend guidance", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    ...managedAgentMocks,
+    daemonPackages: [
+      {
+        id: "unsupported-runtime",
+        purpose: "Must use a daemon-capable local runtime.",
+        schedule: "0 9 * * *",
+      },
+    ],
+    daemonBinding: {
+      daemonId: "unsupported-runtime",
+      agentPubkey: AGENT_PUBKEY,
+      channelId: "36411e44-0e2d-4cfe-bd6e-567eb169db9f",
+    },
+    daemonScheduleStatus: {
+      readiness: "unsupported_runtime",
+      readinessReason:
+        "Selected managed agent runtime does not support daemon completion.",
+      nextOccurrenceUtc: null,
+    },
+  });
+  await openDaemons(page);
+  await page.getByTestId("daemon-card-unsupported-runtime").click();
+
+  const runPanel = page.getByTestId("daemon-run-panel");
+  const runButton = runPanel.getByRole("button", { name: "Run now" });
+  await expect(runButton).toBeDisabled();
+  await expect(
+    runPanel.getByText(
+      "Selected managed agent runtime does not support daemon completion.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await runButton.click({ force: true });
+  const commands = await page.evaluate(
+    () => window.__BUZZ_E2E_COMMANDS__ ?? [],
+  );
+  expect(commands).not.toContain("run_managed_daemon");
+});
+
 test("export and open-folder commands report success and actionable failures", async ({
   page,
 }) => {

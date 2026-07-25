@@ -48,8 +48,8 @@ pub(crate) fn parse_daemon_policy(
     let (frontmatter, body) = rest
         .split_once("\n---\n")
         .ok_or("DAEMON.md frontmatter is missing its closing delimiter")?;
-    let yaml: serde_yaml::Value = serde_yaml::from_str(frontmatter)
-        .map_err(|error| format!("invalid DAEMON.md frontmatter: {error}"))?;
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(frontmatter).map_err(|error| yaml_frontmatter_error(&error))?;
     if !matches!(yaml, serde_yaml::Value::Mapping(_)) {
         return Err("DAEMON.md frontmatter must be a YAML object/map".into());
     }
@@ -95,6 +95,12 @@ pub(crate) fn parse_daemon_policy(
         body: body.trim().to_string(),
         activation_mode,
     })
+}
+
+fn yaml_frontmatter_error(error: &serde_yaml::Error) -> String {
+    format!(
+        "invalid DAEMON.md frontmatter: {error}. Quote values that begin with YAML-reserved syntax such as `*`; for example: `schedule: \"*/2 * * * *\"`"
+    )
 }
 
 fn validate_nonempty_list(name: &str, values: &[String], required: bool) -> Result<(), String> {

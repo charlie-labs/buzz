@@ -139,16 +139,19 @@ fn schedule_status_for_binding(
             ));
         }
     };
+    let binding_readiness = || {
+        if let Err(error) = super::revalidate_binding_context(binding) {
+            return Err((DaemonScheduleReadiness::InvalidContext, Some(error)));
+        }
+        crate::managed_agents::daemon_binding_readiness(app, binding)
+    };
     let Some(expression) = package.policy.schedule.as_deref() else {
-        return Ok(status(
-            binding,
-            None,
-            None,
+        let (readiness, reason) = manual_mode_readiness(
+            binding_readiness(),
             DaemonScheduleReadiness::WatchOnly,
-            Some("DAEMON.md has no schedule; manual Run now remains available".into()),
-            None,
-            store,
-        ));
+            "DAEMON.md has no schedule; manual Run now remains available",
+        );
+        return Ok(status(binding, None, None, readiness, reason, None, store));
     };
     let hash = schedule_hash(expression);
     let schedule = match parse_schedule(expression) {
@@ -167,28 +170,22 @@ fn schedule_status_for_binding(
     };
     let next = schedule.after(&minute_floor(now)).next().map(utc_string);
     if !binding.schedule_enabled {
-        return Ok(status(
-            binding,
-            Some(expression.into()),
-            Some(hash),
+        let (readiness, reason) = manual_mode_readiness(
+            binding_readiness(),
             DaemonScheduleReadiness::Disabled,
-            Some("scheduled execution is disabled; manual Run now remains available".into()),
-            next,
-            store,
-        ));
-    }
-    if let Err(error) = super::revalidate_binding_context(binding) {
+            "scheduled execution is disabled; manual Run now remains available",
+        );
         return Ok(status(
             binding,
             Some(expression.into()),
             Some(hash),
-            DaemonScheduleReadiness::InvalidContext,
-            Some(error),
+            readiness,
+            reason,
             next,
             store,
         ));
     }
-    let (readiness, reason) = match crate::managed_agents::daemon_binding_readiness(app, binding) {
+    let (readiness, reason) = match binding_readiness() {
         Ok(()) => (DaemonScheduleReadiness::Ready, None),
         Err(value) => value,
     };
@@ -201,6 +198,17 @@ fn schedule_status_for_binding(
         next,
         store,
     ))
+}
+
+fn manual_mode_readiness(
+    validation: Result<(), (DaemonScheduleReadiness, Option<String>)>,
+    eligible_readiness: DaemonScheduleReadiness,
+    eligible_reason: &str,
+) -> (DaemonScheduleReadiness, Option<String>) {
+    match validation {
+        Ok(()) => (eligible_readiness, Some(eligible_reason.into())),
+        Err(failure) => failure,
+    }
 }
 
 async fn process_scheduler_tick(app: &AppHandle, now: DateTime<Utc>) -> Result<(), String> {
@@ -619,5 +627,56 @@ mod tests {
         let occurrence = at("2026-07-24T21:00:00Z");
         let claim = occurrence_claim("binding", "hash", occurrence);
         assert_eq!(occurrence_run_id(&claim), occurrence_run_id(&claim));
+    }
+
+    #[test]
+    fn disabled_and_watch_only_require_valid_manual_binding_prerequisites() {
+        let unsupported = (
+            DaemonScheduleReadiness::UnsupportedRuntime,
+            Some("unsupported".into()),
+        );
+        assert_eq!(
+            manual_mode_readiness(
+                Err(unsupported.clone()),
+                DaemonScheduleReadiness::Disabled,
+                "manual available",
+            ),
+            unsupported
+        );
+
+        let missing = (
+            DaemonScheduleReadiness::MissingAgent,
+            Some("missing".into()),
+        );
+        assert_eq!(
+            manual_mode_readiness(
+                Err(missing.clone()),
+                DaemonScheduleReadiness::WatchOnly,
+                "manual available",
+            ),
+            missing
+        );
+        assert_eq!(
+            manual_mode_readiness(
+                Ok(()),
+                DaemonScheduleReadiness::Disabled,
+                "manual available",
+            ),
+            (
+                DaemonScheduleReadiness::Disabled,
+                Some("manual available".into())
+            )
+        );
+        assert_eq!(
+            manual_mode_readiness(
+                Ok(()),
+                DaemonScheduleReadiness::WatchOnly,
+                "manual available",
+            ),
+            (
+                DaemonScheduleReadiness::WatchOnly,
+                Some("manual available".into())
+            )
+        );
     }
 }

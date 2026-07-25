@@ -6,9 +6,19 @@ import {
   daemonOutputAction,
   durationLabel,
   formatDaemonActionError,
+  isManualDaemonRunEligible,
   readinessLabel,
   runStateLabel,
 } from "./presentation.ts";
+
+test("manual runs require a backend-confirmed eligible schedule status", () => {
+  assert.equal(isManualDaemonRunEligible("ready"), true);
+  assert.equal(isManualDaemonRunEligible("disabled"), true);
+  assert.equal(isManualDaemonRunEligible("watch_only"), true);
+  assert.equal(isManualDaemonRunEligible("unsupported_runtime"), false);
+  assert.equal(isManualDaemonRunEligible("agent_not_ready"), false);
+  assert.equal(isManualDaemonRunEligible(undefined), false);
+});
 
 test("presents activation and readiness in actionable language", () => {
   assert.equal(activationModeLabel("hybrid"), "Watch + schedule");

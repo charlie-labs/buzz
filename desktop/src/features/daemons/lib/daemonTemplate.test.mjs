@@ -31,6 +31,21 @@ test("builds canonical strict scheduled DAEMON.md", () => {
   assert.match(markdown, /## Decision policy/);
 });
 
+test("quotes and round-trips cron values that begin with YAML reserved syntax", () => {
+  const markdown = buildDaemonMd({
+    id: "frequent-check",
+    purpose: "Checks a bounded condition frequently.",
+    routines: ["Inspect the bounded condition"],
+    activation: "schedule",
+    schedule: "*/2 * * * *",
+    body: "No-op when the condition is healthy.",
+  });
+  const frontmatter = markdown.match(/^---\n([\s\S]*?)\n---/)?.[1];
+  assert.ok(frontmatter);
+  assert.match(markdown, /schedule: "\*\/2 \* \* \* \*"/);
+  assert.equal(parseYaml(frontmatter).schedule, "*/2 * * * *");
+});
+
 test("requires at least one valid activation source", () => {
   assert.throws(
     () =>

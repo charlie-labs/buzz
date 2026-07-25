@@ -34,6 +34,16 @@ export function readinessLabel(readiness: DaemonScheduleReadiness): string {
   return labels[readiness];
 }
 
+export function isManualDaemonRunEligible(
+  readiness: DaemonScheduleReadiness | null | undefined,
+): boolean {
+  return (
+    readiness === "ready" ||
+    readiness === "disabled" ||
+    readiness === "watch_only"
+  );
+}
+
 export function runStateLabel(
   lifecycle: DaemonRunLifecycle,
   status: DaemonRunStatus | null,

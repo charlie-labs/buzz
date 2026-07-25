@@ -34,6 +34,7 @@ import {
   durationLabel,
   formatDaemonActionError,
   formatUtcAndLocal,
+  isManualDaemonRunEligible,
   readinessLabel,
   runStateLabel,
 } from "@/features/daemons/lib/presentation";
@@ -45,6 +46,7 @@ import {
   type DaemonBinding,
   type DaemonPackageDetail,
   type DaemonRunRecord,
+  type DaemonScheduleStatus,
   type LegacyDaemonRunRecord,
 } from "@/shared/api/tauriDaemons";
 import {
@@ -329,6 +331,9 @@ export function DaemonDetailView({ daemonId }: { daemonId: string }) {
           bindingId={binding?.id ?? null}
           daemon={daemon}
           history={daemonHistory}
+          scheduleError={scheduleQuery.isError}
+          scheduleLoading={scheduleQuery.isPending}
+          scheduleStatus={scheduleQuery.data}
         />
         <HistoryPanel
           onViewOutput={(channelId, eventId) =>
@@ -649,10 +654,16 @@ function RunPanel({
   bindingId,
   daemon,
   history,
+  scheduleError,
+  scheduleLoading,
+  scheduleStatus,
 }: {
   bindingId: string | null;
   daemon: DaemonPackageDetail;
   history: HistoryRecord[];
+  scheduleError: boolean;
+  scheduleLoading: boolean;
+  scheduleStatus: DaemonScheduleStatus | undefined;
 }) {
   const run = useRunDaemonMutation(bindingId ?? "");
   const cancel = useCancelDaemonMutation();
@@ -664,9 +675,24 @@ function RunPanel({
       (record): record is ManagedHistoryRecord =>
         record.recordType === "managed" && record.status === null,
     ) ?? null;
+  const manualEligible =
+    Boolean(bindingId) &&
+    !scheduleLoading &&
+    !scheduleError &&
+    isManualDaemonRunEligible(scheduleStatus?.readiness);
+  const disabledReason = !bindingId
+    ? "Complete setup before running this daemon."
+    : scheduleLoading
+      ? "Checking whether this setup can run…"
+      : scheduleError || !scheduleStatus
+        ? "Buzz could not verify whether this setup can run. Try again shortly."
+        : !isManualDaemonRunEligible(scheduleStatus.readiness)
+          ? (scheduleStatus.readinessReason ??
+            readinessLabel(scheduleStatus.readiness))
+          : null;
 
   async function handleRun() {
-    if (!bindingId) return;
+    if (!bindingId || !manualEligible || !wakeInstruction.trim()) return;
     try {
       await run.mutateAsync({
         runId: crypto.randomUUID(),
@@ -681,7 +707,10 @@ function RunPanel({
   }
 
   return (
-    <section className="rounded-2xl border border-border bg-card p-5">
+    <section
+      className="rounded-2xl border border-border bg-card p-5"
+      data-testid="daemon-run-panel"
+    >
       <SectionHeader
         description="Manual runs work for scheduled, disabled, and watch-only daemons once setup is valid."
         title="Run now"
@@ -693,10 +722,8 @@ function RunPanel({
         rows={3}
         value={wakeInstruction}
       />
-      {!bindingId ? (
-        <p className="mt-2 text-xs text-muted-foreground">
-          Complete setup before running this daemon.
-        </p>
+      {disabledReason ? (
+        <p className="mt-2 text-xs text-muted-foreground">{disabledReason}</p>
       ) : null}
       <div className="mt-4 flex justify-end gap-2">
         {active ? (
@@ -714,7 +741,9 @@ function RunPanel({
           </>
         ) : (
           <Button
-            disabled={!bindingId || !wakeInstruction.trim() || run.isPending}
+            disabled={
+              !manualEligible || !wakeInstruction.trim() || run.isPending
+            }
             onClick={() => void handleRun()}
           >
             <Play className="h-4 w-4" />
@@ -889,7 +918,8 @@ function DaemonEditor({
           <DialogTitle>Edit DAEMON.md</DialogTitle>
           <DialogDescription>
             Strict validation runs before save. Scripts, references, and other
-            support files remain intact.
+            support files remain intact. Quote values that begin with YAML
+            reserved syntax, for example: `schedule: "*/2 * * * *"`.
           </DialogDescription>
         </DialogHeader>
         <Textarea

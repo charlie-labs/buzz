@@ -18,7 +18,9 @@ use super::{
 use crate::commands::managed_agent_channel_message_event_id_by_marker;
 use crate::{
     app_state::AppState,
-    managed_agents::{load_managed_agents, ManagedAgentRuntimeKey},
+    managed_agents::{
+        load_managed_agents, validate_daemon_agent_record_capability, ManagedAgentRuntimeKey,
+    },
 };
 
 #[tauri::command]
@@ -484,7 +486,7 @@ fn validate_managed_agent_relationship(
     if record.relay_url.trim_end_matches('/') != relay_url.trim_end_matches('/') {
         return Err("daemon binding relay must match the selected managed agent relay".into());
     }
-    Ok(())
+    validate_daemon_agent_record_capability(app, record)
 }
 
 async fn pick_file(app: &AppHandle) -> Result<Option<String>, String> {

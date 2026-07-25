@@ -44,6 +44,13 @@ fn canonical_policy_accepts_watch_schedule_and_hybrid() {
     )
     .unwrap();
     assert_eq!(hybrid.activation_mode, DaemonActivationMode::Hybrid);
+
+    let frequent = super::parse_daemon_policy(
+        &daemon_md("frequent", "schedule: \"*/2 * * * *\"\n"),
+        Some("frequent"),
+    )
+    .unwrap();
+    assert_eq!(frequent.schedule.as_deref(), Some("*/2 * * * *"));
 }
 
 #[test]
@@ -80,6 +87,13 @@ fn canonical_policy_rejects_unknown_missing_empty_cron_and_id_mismatch() {
     )
     .unwrap_err()
     .contains("match its directory"));
+
+    let yaml_error =
+        super::parse_daemon_policy(&daemon_md("bad", "schedule: */2 * * * *\n"), Some("bad"))
+            .unwrap_err();
+    assert!(yaml_error.contains("invalid DAEMON.md frontmatter"));
+    assert!(yaml_error.contains("YAML-reserved syntax"));
+    assert!(yaml_error.contains("schedule: \"*/2 * * * *\""));
 }
 
 #[test]
@@ -367,8 +381,7 @@ fn no_op_terminal_receipt_serializes_without_publication_state() {
         DaemonRunTrigger::Manual,
         None,
     )
-    .unwrap()
-    else {
+    .unwrap() else {
         panic!("expected new reservation")
     };
     record.lifecycle = DaemonRunLifecycle::Terminal;
