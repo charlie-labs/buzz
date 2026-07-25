@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use super::{
-    commands::{delete_binding_record, ensure_primary_binding_available},
+    commands::{
+        apply_daemon_binding_update, delete_binding_record, ensure_primary_binding_available,
+    },
     package::{
         copy_source_to_staging, load_package_directory, promote_package, safe_export,
         stage_package, stage_package_update, MAX_PACKAGE_DEPTH, MAX_PACKAGE_FILES,
@@ -277,6 +279,36 @@ fn update_context_distinguishes_omission_and_explicit_null() {
     }))
     .unwrap();
     assert_eq!(cleared.context_directory, Some(None));
+}
+
+#[test]
+fn schedule_only_update_rejects_unchanged_unsupported_agent_without_persisting() {
+    let original = binding();
+    let request = UpdateDaemonBindingRequest {
+        id: original.id.clone(),
+        daemon_id: None,
+        agent_pubkey: None,
+        relay_url: None,
+        channel_id: None,
+        context_directory: None,
+        schedule_enabled: Some(true),
+    };
+
+    let error = apply_daemon_binding_update(
+        original.clone(),
+        request,
+        "2026-07-25T00:00:00Z".into(),
+        |_| Ok(()),
+        |pubkey, relay_url| {
+            assert_eq!(pubkey, original.agent_pubkey);
+            assert_eq!(relay_url, original.relay_url);
+            Err("selected managed agent runtime does not support daemon completion".into())
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("does not support daemon completion"));
+    assert!(!original.schedule_enabled);
 }
 
 #[test]

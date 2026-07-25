@@ -35,6 +35,7 @@ import {
   formatDaemonActionError,
   formatUtcAndLocal,
   isManualDaemonRunEligible,
+  manualDaemonRunDisabledReason,
   readinessLabel,
   runStateLabel,
 } from "@/features/daemons/lib/presentation";
@@ -680,16 +681,12 @@ function RunPanel({
     !scheduleLoading &&
     !scheduleError &&
     isManualDaemonRunEligible(scheduleStatus?.readiness);
-  const disabledReason = !bindingId
-    ? "Complete setup before running this daemon."
-    : scheduleLoading
-      ? "Checking whether this setup can run…"
-      : scheduleError || !scheduleStatus
-        ? "Buzz could not verify whether this setup can run. Try again shortly."
-        : !isManualDaemonRunEligible(scheduleStatus.readiness)
-          ? (scheduleStatus.readinessReason ??
-            readinessLabel(scheduleStatus.readiness))
-          : null;
+  const disabledReason = manualDaemonRunDisabledReason({
+    bindingId,
+    scheduleLoading,
+    scheduleError,
+    scheduleStatus,
+  });
 
   async function handleRun() {
     if (!bindingId || !manualEligible || !wakeInstruction.trim()) return;

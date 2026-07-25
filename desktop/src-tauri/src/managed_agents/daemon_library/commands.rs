@@ -281,7 +281,7 @@ pub async fn update_daemon_binding(
     app: AppHandle,
 ) -> Result<DaemonBindingSummary, String> {
     let state = app.state::<AppState>();
-    let (original, mut binding) = {
+    let (original, binding) = {
         let _guard = state
             .managed_agents_store_lock
             .lock()
@@ -293,34 +293,13 @@ pub async fn update_daemon_binding(
             .ok_or("daemon binding not found")?;
         (binding.clone(), binding)
     };
-    if let Some(daemon_id) = request.daemon_id {
-        super::load_managed_package(&app, daemon_id.trim())?;
-        binding.daemon_id = daemon_id.trim().to_string();
-    }
-    if request.agent_pubkey.is_some() || request.relay_url.is_some() {
-        let key = ManagedAgentRuntimeKey::new(
-            request
-                .agent_pubkey
-                .unwrap_or_else(|| binding.agent_pubkey.clone()),
-            request.relay_url.as_deref().unwrap_or(&binding.relay_url),
-        )?;
-        validate_managed_agent_relationship(&app, &key.pubkey, &key.relay_url)?;
-        binding.agent_pubkey = key.pubkey;
-        binding.relay_url = key.relay_url;
-    }
-    if let Some(channel_id) = request.channel_id {
-        binding.channel_id = Uuid::parse_str(channel_id.trim())
-            .map_err(|_| "invalid channel UUID")?
-            .to_string();
-    }
-    if let Some(context_patch) = request.context_directory {
-        binding.context_directory = canonical_context(context_patch.as_deref())?;
-        binding.context_configured = binding.context_directory.is_some();
-    }
-    if let Some(enabled) = request.schedule_enabled {
-        binding.schedule_enabled = enabled;
-    }
-    binding.updated_at = crate::util::now_iso();
+    let binding = apply_daemon_binding_update(
+        binding,
+        request,
+        crate::util::now_iso(),
+        |daemon_id| super::load_managed_package(&app, daemon_id).map(|_| ()),
+        |pubkey, relay_url| validate_managed_agent_relationship(&app, pubkey, relay_url),
+    )?;
     crate::managed_agents::validate_daemon_output_channel(&app, &binding).await?;
 
     let _guard = state
@@ -340,6 +319,44 @@ pub async fn update_daemon_binding(
     store.bindings[index] = binding.clone();
     store.save(&app)?;
     Ok((&binding).into())
+}
+
+pub(crate) fn apply_daemon_binding_update(
+    mut binding: DaemonBinding,
+    request: UpdateDaemonBindingRequest,
+    updated_at: String,
+    mut validate_package: impl FnMut(&str) -> Result<(), String>,
+    validate_relationship: impl FnOnce(&str, &str) -> Result<(), String>,
+) -> Result<DaemonBinding, String> {
+    if let Some(daemon_id) = request.daemon_id {
+        validate_package(daemon_id.trim())?;
+        binding.daemon_id = daemon_id.trim().to_string();
+    }
+    if request.agent_pubkey.is_some() || request.relay_url.is_some() {
+        let key = ManagedAgentRuntimeKey::new(
+            request
+                .agent_pubkey
+                .unwrap_or_else(|| binding.agent_pubkey.clone()),
+            request.relay_url.as_deref().unwrap_or(&binding.relay_url),
+        )?;
+        binding.agent_pubkey = key.pubkey;
+        binding.relay_url = key.relay_url;
+    }
+    if let Some(channel_id) = request.channel_id {
+        binding.channel_id = Uuid::parse_str(channel_id.trim())
+            .map_err(|_| "invalid channel UUID")?
+            .to_string();
+    }
+    if let Some(context_patch) = request.context_directory {
+        binding.context_directory = canonical_context(context_patch.as_deref())?;
+        binding.context_configured = binding.context_directory.is_some();
+    }
+    if let Some(enabled) = request.schedule_enabled {
+        binding.schedule_enabled = enabled;
+    }
+    binding.updated_at = updated_at;
+    validate_relationship(&binding.agent_pubkey, &binding.relay_url)?;
+    Ok(binding)
 }
 
 #[tauri::command]

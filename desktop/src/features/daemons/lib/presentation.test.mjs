@@ -7,17 +7,76 @@ import {
   durationLabel,
   formatDaemonActionError,
   isManualDaemonRunEligible,
+  manualDaemonRunDisabledReason,
   readinessLabel,
   runStateLabel,
 } from "./presentation.ts";
 
 test("manual runs require a backend-confirmed eligible schedule status", () => {
-  assert.equal(isManualDaemonRunEligible("ready"), true);
-  assert.equal(isManualDaemonRunEligible("disabled"), true);
-  assert.equal(isManualDaemonRunEligible("watch_only"), true);
-  assert.equal(isManualDaemonRunEligible("unsupported_runtime"), false);
-  assert.equal(isManualDaemonRunEligible("agent_not_ready"), false);
+  for (const readiness of ["ready", "disabled", "watch_only"]) {
+    assert.equal(isManualDaemonRunEligible(readiness), true);
+  }
+  for (const readiness of [
+    "missing_package",
+    "invalid_schedule",
+    "missing_agent",
+    "relay_mismatch",
+    "channel_unavailable",
+    "unsupported_runtime",
+    "agent_not_ready",
+    "invalid_context",
+  ]) {
+    assert.equal(isManualDaemonRunEligible(readiness), false);
+    assert.ok(readinessLabel(readiness));
+  }
+  assert.equal(isManualDaemonRunEligible(null), false);
   assert.equal(isManualDaemonRunEligible(undefined), false);
+});
+
+test("manual run ineligibility always exposes an explanation", () => {
+  const base = {
+    bindingId: "binding-1",
+    scheduleLoading: false,
+    scheduleError: false,
+    scheduleStatus: undefined,
+  };
+  assert.match(
+    manualDaemonRunDisabledReason({ ...base, bindingId: null }),
+    /Complete setup/,
+  );
+  assert.match(
+    manualDaemonRunDisabledReason({ ...base, scheduleLoading: true }),
+    /Checking/,
+  );
+  assert.match(
+    manualDaemonRunDisabledReason({ ...base, scheduleError: true }),
+    /could not verify/,
+  );
+  assert.match(manualDaemonRunDisabledReason(base), /could not verify/);
+  assert.equal(
+    manualDaemonRunDisabledReason({
+      ...base,
+      scheduleStatus: {
+        readiness: "unsupported_runtime",
+        readinessReason: "This runtime cannot complete daemon runs.",
+        nextOccurrenceUtc: null,
+      },
+    }),
+    "This runtime cannot complete daemon runs.",
+  );
+  for (const readiness of ["ready", "disabled", "watch_only"]) {
+    assert.equal(
+      manualDaemonRunDisabledReason({
+        ...base,
+        scheduleStatus: {
+          readiness,
+          readinessReason: null,
+          nextOccurrenceUtc: null,
+        },
+      }),
+      null,
+    );
+  }
 });
 
 test("presents activation and readiness in actionable language", () => {

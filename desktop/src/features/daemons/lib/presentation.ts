@@ -3,6 +3,7 @@ import type {
   DaemonRunLifecycle,
   DaemonRunStatus,
   DaemonScheduleReadiness,
+  DaemonScheduleStatus,
 } from "@/shared/api/tauriDaemons";
 
 export const schedulePresets = [
@@ -42,6 +43,26 @@ export function isManualDaemonRunEligible(
     readiness === "disabled" ||
     readiness === "watch_only"
   );
+}
+
+export function manualDaemonRunDisabledReason(input: {
+  bindingId: string | null;
+  scheduleLoading: boolean;
+  scheduleError: boolean;
+  scheduleStatus: DaemonScheduleStatus | undefined;
+}): string | null {
+  if (!input.bindingId) return "Complete setup before running this daemon.";
+  if (input.scheduleLoading) return "Checking whether this setup can run…";
+  if (input.scheduleError || !input.scheduleStatus) {
+    return "Buzz could not verify whether this setup can run. Try again shortly.";
+  }
+  if (!isManualDaemonRunEligible(input.scheduleStatus.readiness)) {
+    return (
+      input.scheduleStatus.readinessReason ??
+      readinessLabel(input.scheduleStatus.readiness)
+    );
+  }
+  return null;
 }
 
 export function runStateLabel(
