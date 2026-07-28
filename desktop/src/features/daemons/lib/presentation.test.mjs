@@ -62,7 +62,18 @@ test("manual run ineligibility always exposes an explanation", () => {
         nextOccurrenceUtc: null,
       },
     }),
-    "This runtime cannot complete daemon runs.",
+    "No run was sent to the desktop runner. This runtime cannot complete daemon runs. Configure the selected managed agent with a daemon-capable local runtime (Codex or Buzz Agent), start or restart it, save or complete setup, and retry.",
+  );
+  assert.match(
+    manualDaemonRunDisabledReason({
+      ...base,
+      scheduleStatus: {
+        readiness: "agent_not_ready",
+        readinessReason: "The selected managed agent has not finished setup.",
+        nextOccurrenceUtc: null,
+      },
+    }),
+    /No run was sent.*not finished setup.*Codex or Buzz Agent.*retry/,
   );
   for (const readiness of ["ready", "disabled", "watch_only"]) {
     assert.equal(

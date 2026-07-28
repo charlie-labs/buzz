@@ -29,6 +29,33 @@ const IDLE_TIMEOUT_SECONDS: u64 = 300;
 const HARD_TIMEOUT_SECONDS: u64 = 1800;
 const MAX_DIAGNOSTIC_CHARS: usize = 512;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreflightRejectionReason {
+    ShutdownStarted,
+    InvalidRunId,
+    InvalidWake,
+    InvalidScheduleOccurrence,
+    BindingUnavailable,
+    PackageUnavailable,
+    ContextInvalid,
+    ReservationUnavailable,
+}
+
+impl PreflightRejectionReason {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ShutdownStarted => "shutdown_started",
+            Self::InvalidRunId => "invalid_run_id",
+            Self::InvalidWake => "invalid_wake",
+            Self::InvalidScheduleOccurrence => "invalid_schedule_occurrence",
+            Self::BindingUnavailable => "binding_unavailable",
+            Self::PackageUnavailable => "package_unavailable",
+            Self::ContextInvalid => "context_invalid",
+            Self::ReservationUnavailable => "reservation_unavailable",
+        }
+    }
+}
+
 pub(crate) struct DaemonControlConfig {
     pub token: String,
     pub ready_file: std::path::PathBuf,
@@ -119,32 +146,56 @@ pub async fn run_managed_daemon(
     request: RunManagedDaemonRequest,
     app: AppHandle,
 ) -> Result<DaemonRunRecord, String> {
+    let trigger = daemon_trigger_label(&request.trigger);
+    let wake_bytes = request.wake_instruction.trim().len();
+    eprintln!(
+        "buzz-desktop: daemon-run stage=command outcome=received trigger={trigger} wake_bytes={wake_bytes}"
+    );
     let state = app.state::<AppState>();
     if state.shutdown_started.load(Ordering::Acquire) {
+        log_preflight_rejection(trigger, PreflightRejectionReason::ShutdownStarted);
         return Err("desktop shutdown has started".into());
     }
-    let run_id = Uuid::parse_str(request.run_id.trim()).map_err(|_| "invalid run UUID")?;
+    let run_id = Uuid::parse_str(request.run_id.trim()).map_err(|_| {
+        log_preflight_rejection(trigger, PreflightRejectionReason::InvalidRunId);
+        "invalid run UUID"
+    })?;
     let wake = request.wake_instruction.trim();
     if wake.is_empty() || wake.len() > MAX_WAKE_BYTES {
+        log_preflight_rejection(trigger, PreflightRejectionReason::InvalidWake);
         return Err("wake instruction is empty or exceeds 32 KiB".into());
     }
     if matches!(request.trigger, super::DaemonRunTrigger::Schedule)
         != request.scheduled_for_utc.is_some()
     {
+        log_preflight_rejection(trigger, PreflightRejectionReason::InvalidScheduleOccurrence);
         return Err("scheduled daemon runs require an explicit UTC occurrence".into());
     }
     if let Some(scheduled_for) = request.scheduled_for_utc.as_deref() {
-        validate_scheduled_occurrence(scheduled_for, Utc::now())?;
+        validate_scheduled_occurrence(scheduled_for, Utc::now()).map_err(|error| {
+            log_preflight_rejection(trigger, PreflightRejectionReason::InvalidScheduleOccurrence);
+            error
+        })?;
     }
-    let binding = get_binding_internal(&app, request.binding_id.trim())?;
-    let package = load_managed_package(&app, &binding.daemon_id)?;
-    let cwd =
-        super::revalidate_binding_context(&binding)?.unwrap_or_else(|| package.directory.clone());
+    let binding = get_binding_internal(&app, request.binding_id.trim()).map_err(|error| {
+        log_preflight_rejection(trigger, PreflightRejectionReason::BindingUnavailable);
+        error
+    })?;
+    let package = load_managed_package(&app, &binding.daemon_id).map_err(|error| {
+        log_preflight_rejection(trigger, PreflightRejectionReason::PackageUnavailable);
+        error
+    })?;
+    let cwd = super::revalidate_binding_context(&binding)
+        .map_err(|error| {
+            log_preflight_rejection(trigger, PreflightRejectionReason::ContextInvalid);
+            error
+        })?
+        .unwrap_or_else(|| package.directory.clone());
     let reservation = {
-        let _guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|error| error.to_string())?;
+        let _guard = state.managed_agents_store_lock.lock().map_err(|error| {
+            log_preflight_rejection(trigger, PreflightRejectionReason::ReservationUnavailable);
+            error.to_string()
+        })?;
         reserve_run(
             &app,
             &run_id.to_string(),
@@ -153,7 +204,11 @@ pub async fn run_managed_daemon(
             wake,
             request.trigger,
             request.scheduled_for_utc.as_deref(),
-        )?
+        )
+        .map_err(|error| {
+            log_preflight_rejection(trigger, PreflightRejectionReason::ReservationUnavailable);
+            error
+        })?
     };
     let mut record = match reservation {
         super::Reservation::ExistingTerminal(record) => {
@@ -518,6 +573,21 @@ fn log_daemon_stage(record: &DaemonRunRecord, stage: &str, outcome: &str) {
         record.daemon_id,
         record.binding.agent_pubkey,
         record.trigger,
+    );
+}
+
+fn daemon_trigger_label(trigger: &super::DaemonRunTrigger) -> &'static str {
+    match trigger {
+        super::DaemonRunTrigger::Manual => "manual",
+        super::DaemonRunTrigger::Watch => "watch",
+        super::DaemonRunTrigger::Schedule => "schedule",
+    }
+}
+
+fn log_preflight_rejection(trigger: &str, reason: PreflightRejectionReason) {
+    let reason = reason.label();
+    eprintln!(
+        "buzz-desktop: daemon-run stage=preflight outcome=rejected reason={reason} trigger={trigger}"
     );
 }
 
@@ -932,6 +1002,41 @@ mod tests {
     fn request_rejects_removed_renderer_paths_and_camel_case_is_stable() {
         let value = serde_json::json!({"runId": Uuid::new_v4().to_string(), "bindingId": Uuid::new_v4().to_string(), "wakeInstruction": "run now", "packageRoot": "/tmp"});
         assert!(serde_json::from_value::<RunManagedDaemonRequest>(value).is_err());
+    }
+
+    #[test]
+    fn preflight_rejection_labels_are_stable_and_content_free() {
+        assert_eq!(
+            PreflightRejectionReason::InvalidRunId.label(),
+            "invalid_run_id"
+        );
+        assert_eq!(
+            PreflightRejectionReason::InvalidScheduleOccurrence.label(),
+            "invalid_schedule_occurrence"
+        );
+        assert_eq!(
+            PreflightRejectionReason::ReservationUnavailable.label(),
+            "reservation_unavailable"
+        );
+        assert_eq!(
+            daemon_trigger_label(&super::DaemonRunTrigger::Manual),
+            "manual"
+        );
+        for reason in [
+            PreflightRejectionReason::ShutdownStarted,
+            PreflightRejectionReason::InvalidRunId,
+            PreflightRejectionReason::InvalidWake,
+            PreflightRejectionReason::InvalidScheduleOccurrence,
+            PreflightRejectionReason::BindingUnavailable,
+            PreflightRejectionReason::PackageUnavailable,
+            PreflightRejectionReason::ContextInvalid,
+            PreflightRejectionReason::ReservationUnavailable,
+        ] {
+            assert!(reason
+                .label()
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_'));
+        }
     }
 
     #[test]

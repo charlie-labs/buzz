@@ -51,16 +51,26 @@ export function manualDaemonRunDisabledReason(input: {
   scheduleError: boolean;
   scheduleStatus: DaemonScheduleStatus | undefined;
 }): string | null {
-  if (!input.bindingId) return "Complete setup before running this daemon.";
-  if (input.scheduleLoading) return "Checking whether this setup can run…";
+  const notSent = "No run was sent to the desktop runner.";
+  if (!input.bindingId) {
+    return `${notSent} Complete setup before running this daemon.`;
+  }
+  if (input.scheduleLoading) {
+    return `${notSent} Checking whether this setup can run…`;
+  }
   if (input.scheduleError || !input.scheduleStatus) {
-    return "Buzz could not verify whether this setup can run. Try again shortly.";
+    return `${notSent} Buzz could not verify whether this setup can run. Try again shortly.`;
   }
   if (!isManualDaemonRunEligible(input.scheduleStatus.readiness)) {
-    return (
+    const readinessReason =
       input.scheduleStatus.readinessReason ??
-      readinessLabel(input.scheduleStatus.readiness)
-    );
+      readinessLabel(input.scheduleStatus.readiness);
+    const setupGuidance =
+      input.scheduleStatus.readiness === "unsupported_runtime" ||
+      input.scheduleStatus.readiness === "agent_not_ready"
+        ? " Configure the selected managed agent with a daemon-capable local runtime (Codex or Buzz Agent), start or restart it, save or complete setup, and retry."
+        : "";
+    return `${notSent} ${readinessReason}${setupGuidance}`;
   }
   return null;
 }

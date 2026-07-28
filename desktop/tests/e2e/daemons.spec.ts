@@ -250,7 +250,7 @@ test("channel-unavailable readiness explains active relay validation", async ({
   );
 });
 
-test("unsupported runtime disables Run now and preserves the backend guidance", async ({
+test("unsupported runtime explains no native run was sent and preserves guidance", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -281,11 +281,14 @@ test("unsupported runtime disables Run now and preserves the backend guidance", 
   const runButton = runPanel.getByRole("button", { name: "Run now" });
   await expect(runButton).toBeDisabled();
   await expect(
-    runPanel.getByText(
-      "Selected managed agent runtime does not support daemon completion.",
-      { exact: true },
-    ),
+    runPanel.getByText(/No run was sent to the desktop runner\./),
   ).toBeVisible();
+  await expect(runPanel).toContainText(
+    "Selected managed agent runtime does not support daemon completion.",
+  );
+  await expect(runPanel).toContainText(
+    "Configure the selected managed agent with a daemon-capable local runtime (Codex or Buzz Agent), start or restart it, save or complete setup, and retry.",
+  );
   await runButton.click({ force: true });
   const commands = await page.evaluate(
     () => window.__BUZZ_E2E_COMMANDS__ ?? [],
