@@ -12,9 +12,9 @@ use super::{
     agent_readiness, finalize_run, get_binding_internal, known_acp_runtime,
     load_global_agent_config, load_managed_agents, load_managed_package, load_personas,
     mark_run_publishing, mark_run_running, record_agent_command, reserve_run,
-    resolve_effective_agent_env, start_managed_agent_runtime_pair_lazy, terminalize_run,
-    AgentReadiness, BackendKind, DaemonRunRecord, DaemonRunStatus, ManagedAgentRuntimeKey,
-    RunManagedDaemonRequest,
+    resolve_effective_agent_env, start_managed_agent_runtime_pair_lazy_with_disposition,
+    terminalize_run, AgentReadiness, BackendKind, DaemonRunRecord, DaemonRunStatus,
+    ManagedAgentRuntimeKey, RunManagedDaemonRequest,
 };
 use crate::{
     app_state::AppState,
@@ -62,6 +62,35 @@ pub(crate) fn daemon_control(
 struct ControlReady {
     pid: u32,
     base_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ControlObservation {
+    RuntimeMissing,
+    ReadyFileMissing,
+    ReadyFileUnsafe,
+    ReadyFileUnreadable,
+    ReadyFileMalformed,
+    PidMismatch,
+    InvalidUrl,
+    PingRequestFailed,
+    PingRejected(u16),
+}
+
+impl ControlObservation {
+    fn label(&self) -> String {
+        match self {
+            Self::RuntimeMissing => "runtime missing".into(),
+            Self::ReadyFileMissing => "control file missing".into(),
+            Self::ReadyFileUnsafe => "control file unsafe".into(),
+            Self::ReadyFileUnreadable => "control file unreadable".into(),
+            Self::ReadyFileMalformed => "control file malformed".into(),
+            Self::PidMismatch => "control file stale (PID mismatch)".into(),
+            Self::InvalidUrl => "control URL invalid".into(),
+            Self::PingRequestFailed => "control ping failed".into(),
+            Self::PingRejected(status) => format!("control ping rejected ({status})"),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -127,8 +156,12 @@ pub async fn run_managed_daemon(
         )?
     };
     let mut record = match reservation {
-        super::Reservation::ExistingTerminal(record) => return Ok(record),
+        super::Reservation::ExistingTerminal(record) => {
+            log_daemon_stage(&record, "receipt", "existing_terminal");
+            return Ok(record);
+        }
         super::Reservation::ExistingPublishing(record) => {
+            log_daemon_stage(&record, "receipt", "existing_publishing");
             if let Some(event_id) = managed_agent_channel_message_event_id_by_marker(
                 &state,
                 &record.binding.agent_pubkey,
@@ -148,7 +181,10 @@ pub async fn run_managed_daemon(
                     .into(),
             );
         }
-        super::Reservation::New(record) => record,
+        super::Reservation::New(record) => {
+            log_daemon_stage(&record, "receipt", "reserved");
+            record
+        }
     };
 
     let cancellation = CancellationToken::new();
@@ -202,7 +238,15 @@ async fn run_managed_daemon_inner(
     record: &mut DaemonRunRecord,
     cancellation: CancellationToken,
 ) -> Result<DaemonRunRecord, String> {
-    if let Err((_, reason)) = daemon_binding_readiness(app, binding) {
+    if let Err((readiness, reason)) = daemon_binding_readiness(app, binding) {
+        eprintln!(
+            "buzz-desktop: daemon-run stage=readiness outcome=unready run_id={} binding_id={} daemon_id={} agent_pubkey={} trigger={:?} readiness={readiness:?}",
+            record.run_id,
+            record.binding_id,
+            record.daemon_id,
+            record.binding.agent_pubkey,
+            record.trigger,
+        );
         let error = reason.unwrap_or_else(|| "daemon binding is not ready".into());
         terminalize_safely(
             app,
@@ -214,7 +258,9 @@ async fn run_managed_daemon_inner(
         )?;
         return Ok(record.clone());
     }
+    log_daemon_stage(record, "readiness", "ready");
     if let Err(error) = validate_daemon_output_channel(app, binding).await {
+        log_daemon_stage(record, "channel_readiness", "failed");
         let status = if record.trigger == super::DaemonRunTrigger::Schedule {
             DaemonRunStatus::SkippedUnready
         } else {
@@ -223,6 +269,7 @@ async fn run_managed_daemon_inner(
         terminalize_safely(app, state, record, status, None, Some(&error))?;
         return Ok(record.clone());
     }
+    log_daemon_stage(record, "channel_readiness", "ready");
     let key = ManagedAgentRuntimeKey::new(binding.agent_pubkey.clone(), &binding.relay_url)?;
     {
         let _guard = state
@@ -231,24 +278,39 @@ async fn run_managed_daemon_inner(
             .map_err(|error| error.to_string())?;
         mark_run_running(app, record)?;
     }
-    if let Err(error) = start_managed_agent_runtime_pair_lazy(
+    log_daemon_stage(record, "receipt", "running");
+    let runtime_start = start_managed_agent_runtime_pair_lazy_with_disposition(
         key.pubkey.clone(),
         key.relay_url.clone(),
         app.clone(),
-    ) {
-        terminalize_safely(
-            app,
-            state,
-            record,
-            DaemonRunStatus::Failed,
-            None,
-            Some(&error),
-        )?;
-        return Ok(record.clone());
+    );
+    match runtime_start {
+        Ok((status, disposition)) => eprintln!(
+            "buzz-desktop: daemon-run stage=runtime outcome={disposition:?} run_id={} binding_id={} daemon_id={} agent_pubkey={} runtime_id={} pid={}",
+            record.run_id,
+            record.binding_id,
+            record.daemon_id,
+            record.binding.agent_pubkey,
+            key.runtime_id(),
+            status.pid.map_or_else(|| "none".into(), |pid| pid.to_string()),
+        ),
+        Err(error) => {
+            log_daemon_stage(record, "runtime", "start_failed");
+            terminalize_safely(
+                app,
+                state,
+                record,
+                DaemonRunStatus::Failed,
+                None,
+                Some(&error),
+            )?;
+            return Ok(record.clone());
+        }
     }
-    let (base_url, bearer) = match wait_for_control(app, &key, &cancellation).await {
+    let (base_url, bearer) = match wait_for_control(app, &key, run_id, &cancellation).await {
         Ok(control) => control,
         Err(error) => {
+            log_daemon_stage(record, "control_readiness", "failed");
             let status = if cancellation.is_cancelled() {
                 DaemonRunStatus::Cancelled
             } else {
@@ -258,6 +320,7 @@ async fn run_managed_daemon_inner(
             return Ok(record.clone());
         }
     };
+    log_daemon_stage(record, "control_readiness", "ready");
 
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(2))
@@ -301,6 +364,7 @@ async fn run_managed_daemon_inner(
         .bearer_auth(&bearer)
         .json(&body)
         .send();
+    log_daemon_stage(record, "control_request", "sent");
     tokio::pin!(run_future);
     let control_result = tokio::select! {
         response = &mut run_future => parse_control_response(response).await,
@@ -324,8 +388,20 @@ async fn run_managed_daemon_inner(
         }
     };
     let response = match control_result {
-        Ok(response) if response.run_id == run_id => response,
+        Ok(response) if response.run_id == run_id => {
+            eprintln!(
+                "buzz-desktop: daemon-run stage=control_response outcome=accepted run_id={} binding_id={} daemon_id={} agent_pubkey={} status={} has_session={}",
+                record.run_id,
+                record.binding_id,
+                record.daemon_id,
+                record.binding.agent_pubkey,
+                response.status,
+                response.session_id.is_some(),
+            );
+            response
+        }
         Ok(_) => {
+            log_daemon_stage(record, "control_response", "run_id_mismatch");
             terminalize_safely(
                 app,
                 state,
@@ -337,6 +413,7 @@ async fn run_managed_daemon_inner(
             return Ok(record.clone());
         }
         Err(error) => {
+            log_daemon_stage(record, "control_response", "failed");
             terminalize_safely(
                 app,
                 state,
@@ -349,6 +426,7 @@ async fn run_managed_daemon_inner(
         }
     };
     if response.status == "cancelled" {
+        log_daemon_stage(record, "completion", "cancelled");
         terminalize_safely(
             app,
             state,
@@ -361,6 +439,7 @@ async fn run_managed_daemon_inner(
     }
     let output = match classify_control_completion(&response.status, response.output_markdown) {
         Ok(None) => {
+            log_daemon_stage(record, "completion", "no_op");
             terminalize_safely(
                 app,
                 state,
@@ -373,6 +452,7 @@ async fn run_managed_daemon_inner(
         }
         Ok(Some(output)) => output,
         Err(error) => {
+            log_daemon_stage(record, "completion", "failed");
             terminalize_safely(
                 app,
                 state,
@@ -392,6 +472,7 @@ async fn run_managed_daemon_inner(
             .map_err(|error| error.to_string())?;
         mark_run_publishing(app, record, response.session_id)?;
     }
+    log_daemon_stage(record, "publication", "publishing");
     let event_id = send_managed_agent_channel_message_inner(
         binding.agent_pubkey.clone(),
         binding.channel_id.clone(),
@@ -406,9 +487,14 @@ async fn run_managed_daemon_inner(
     )
     .await
     .map_err(|error| {
+        log_daemon_stage(record, "publication", "failed");
         format!("daemon output publication failed; publishing state retained for recovery: {error}")
     })?
     .event_id;
+    eprintln!(
+        "buzz-desktop: daemon-run stage=publication outcome=published run_id={} binding_id={} daemon_id={} agent_pubkey={} event_id={event_id}",
+        record.run_id, record.binding_id, record.daemon_id, record.binding.agent_pubkey,
+    );
     let final_result = {
         let _guard = state
             .managed_agents_store_lock
@@ -416,8 +502,23 @@ async fn run_managed_daemon_inner(
             .map_err(|error| error.to_string())?;
         finalize_run(app, record, event_id)
     };
-    final_result.map_err(|error| format!("daemon output was published but final receipt persistence failed; recover by run marker: {error}"))?;
+    final_result.map_err(|error| {
+        log_daemon_stage(record, "receipt_finalization", "failed");
+        format!("daemon output was published but final receipt persistence failed; recover by run marker: {error}")
+    })?;
+    log_daemon_stage(record, "receipt_finalization", "succeeded");
     Ok(record.clone())
+}
+
+fn log_daemon_stage(record: &DaemonRunRecord, stage: &str, outcome: &str) {
+    eprintln!(
+        "buzz-desktop: daemon-run stage={stage} outcome={outcome} run_id={} binding_id={} daemon_id={} agent_pubkey={} trigger={:?}",
+        record.run_id,
+        record.binding_id,
+        record.daemon_id,
+        record.binding.agent_pubkey,
+        record.trigger,
+    );
 }
 
 fn terminalize_safely(
@@ -432,7 +533,14 @@ fn terminalize_safely(
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
-    terminalize_run(app, record, status, session_id, diagnostic)
+    let outcome = format!("{status:?}");
+    let result = terminalize_run(app, record, status, session_id, diagnostic);
+    log_daemon_stage(
+        record,
+        "receipt_finalization",
+        if result.is_ok() { &outcome } else { "failed" },
+    );
+    result
 }
 
 #[tauri::command]
@@ -620,9 +728,11 @@ fn validate_daemon_agent_capability(backend: &BackendKind, command: &str) -> Res
 async fn wait_for_control(
     app: &AppHandle,
     key: &ManagedAgentRuntimeKey,
+    run_id: Uuid,
     cancellation: &CancellationToken,
 ) -> Result<(String, String), String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut last_observation = None;
     loop {
         let control = {
             let state = app.state::<AppState>();
@@ -638,35 +748,91 @@ async fn wait_for_control(
                 )
             })
         };
-        if let Some((pid, token, path)) = control {
-            let safe_ready_file = std::fs::symlink_metadata(&path)
-                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
-            if safe_ready_file {
-                let bytes = std::fs::read(path).unwrap_or_default();
-                if let Ok(ready) = serde_json::from_slice::<ControlReady>(&bytes) {
-                    if ready.pid == pid {
-                        let base_url = validate_loopback_control_url(&ready.base_url)?;
-                        let response = reqwest::Client::new()
-                            .get(format!("{base_url}/v1/ping"))
-                            .bearer_auth(&token)
-                            .timeout(Duration::from_secs(1))
-                            .send()
-                            .await;
-                        if response.is_ok_and(|response| response.status().is_success()) {
-                            return Ok((base_url, token));
-                        }
-                    }
+        let observation = if let Some((pid, token, path)) = control {
+            match std::fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    ControlObservation::ReadyFileMissing
                 }
+                Err(_) => ControlObservation::ReadyFileUnreadable,
+                Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                    ControlObservation::ReadyFileUnsafe
+                }
+                Ok(_) => match std::fs::read(&path) {
+                    Err(_) => ControlObservation::ReadyFileUnreadable,
+                    Ok(bytes) => match serde_json::from_slice::<ControlReady>(&bytes) {
+                        Err(_) => ControlObservation::ReadyFileMalformed,
+                        Ok(ready) if ready.pid != pid => ControlObservation::PidMismatch,
+                        Ok(ready) => match validate_loopback_control_url(&ready.base_url) {
+                            Err(_) => ControlObservation::InvalidUrl,
+                            Ok(base_url) => {
+                                let response = reqwest::Client::new()
+                                    .get(format!("{base_url}/v1/ping"))
+                                    .bearer_auth(&token)
+                                    .timeout(Duration::from_secs(1))
+                                    .send()
+                                    .await;
+                                match response {
+                                    Ok(response) if response.status().is_success() => {
+                                        eprintln!(
+                                            "buzz-desktop: daemon-run stage=control_readiness outcome=ready run_id={run_id} agent_pubkey={} runtime_id={} pid={pid}",
+                                            key.pubkey,
+                                            key.runtime_id(),
+                                        );
+                                        return Ok((base_url, token));
+                                    }
+                                    Ok(response) => {
+                                        ControlObservation::PingRejected(response.status().as_u16())
+                                    }
+                                    Err(_) => ControlObservation::PingRequestFailed,
+                                }
+                            }
+                        },
+                    },
+                },
             }
+        } else {
+            ControlObservation::RuntimeMissing
+        };
+        if last_observation.as_ref() != Some(&observation) {
+            eprintln!(
+                "buzz-desktop: daemon-run stage=control_discovery outcome=waiting run_id={run_id} agent_pubkey={} runtime_id={} state={}",
+                key.pubkey,
+                key.runtime_id(),
+                observation.label(),
+            );
+            last_observation = Some(observation);
         }
         if cancellation.is_cancelled() {
-            return Err("daemon run cancelled before control endpoint became ready".into());
+            let last = last_observation
+                .as_ref()
+                .map(ControlObservation::label)
+                .unwrap_or_else(|| "not observed".into());
+            return Err(format!(
+                "daemon run cancelled before control endpoint became ready (last state: {last})"
+            ));
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err("managed agent daemon control endpoint did not become ready".into());
+            let last = last_observation
+                .as_ref()
+                .map(ControlObservation::label)
+                .unwrap_or_else(|| "not observed".into());
+            eprintln!(
+                "buzz-desktop: daemon-run stage=control_readiness outcome=timeout run_id={run_id} agent_pubkey={} runtime_id={} state={last}",
+                key.pubkey,
+                key.runtime_id(),
+            );
+            return Err(format!(
+                "managed agent daemon control endpoint did not become ready (last state: {last})"
+            ));
         }
         tokio::select! {
-            _ = cancellation.cancelled() => return Err("daemon run cancelled before control endpoint became ready".into()),
+            _ = cancellation.cancelled() => {
+                let last = last_observation
+                    .as_ref()
+                    .map(ControlObservation::label)
+                    .unwrap_or_else(|| "not observed".into());
+                return Err(format!("daemon run cancelled before control endpoint became ready (last state: {last})"));
+            },
             _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
@@ -776,6 +942,19 @@ mod tests {
         );
         assert!(validate_loopback_control_url("https://127.0.0.1:4321").is_err());
         assert!(validate_loopback_control_url("http://example.com:4321").is_err());
+    }
+
+    #[test]
+    fn control_observation_labels_are_actionable_and_path_free() {
+        assert_eq!(
+            ControlObservation::PidMismatch.label(),
+            "control file stale (PID mismatch)"
+        );
+        assert_eq!(
+            ControlObservation::PingRejected(503).label(),
+            "control ping rejected (503)"
+        );
+        assert!(!ControlObservation::ReadyFileMalformed.label().contains('/'));
     }
 
     #[test]

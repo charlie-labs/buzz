@@ -227,6 +227,26 @@ pub(crate) fn start_managed_agent_runtime_pair_lazy(
     start_pair(pubkey, relay_url, true, None, app)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManagedAgentRuntimeStartDisposition {
+    Reused,
+    Spawned,
+}
+
+pub(crate) fn start_managed_agent_runtime_pair_lazy_with_disposition(
+    pubkey: String,
+    relay_url: String,
+    app: AppHandle,
+) -> Result<
+    (
+        ManagedAgentRuntimeStatus,
+        ManagedAgentRuntimeStartDisposition,
+    ),
+    String,
+> {
+    start_pair_with_disposition(pubkey, relay_url, true, None, app)
+}
+
 #[tauri::command]
 pub fn start_managed_agent_runtime(
     pubkey: String,
@@ -243,6 +263,23 @@ fn start_pair(
     expected_updated_at: Option<&str>,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    start_pair_with_disposition(pubkey, relay_url, lazy, expected_updated_at, app)
+        .map(|(status, _)| status)
+}
+
+fn start_pair_with_disposition(
+    pubkey: String,
+    relay_url: String,
+    lazy: bool,
+    expected_updated_at: Option<&str>,
+    app: AppHandle,
+) -> Result<
+    (
+        ManagedAgentRuntimeStatus,
+        ManagedAgentRuntimeStartDisposition,
+    ),
+    String,
+> {
     let state = app.state::<AppState>();
     let _transition = state
         .managed_agent_runtime_transition
@@ -273,7 +310,7 @@ fn start_pair(
         .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
     {
         let status = status_for(&app, record, &key, runtimes.get(&key), None);
-        return Ok(status);
+        return Ok((status, ManagedAgentRuntimeStartDisposition::Reused));
     }
     runtimes.remove(&key);
     terminate_untracked_pair_runtime(&app, &key)?;
@@ -306,7 +343,7 @@ fn start_pair(
     drop(runtimes);
     save_managed_agents(&app, &records)?;
     emit_status(&app, &status);
-    Ok(status)
+    Ok((status, ManagedAgentRuntimeStartDisposition::Spawned))
 }
 
 #[tauri::command]

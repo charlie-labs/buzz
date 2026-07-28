@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useIsMutating,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import {
   cancelManagedDaemon,
@@ -21,6 +26,7 @@ import {
 export const daemonPackagesQueryKey = ["daemon-packages"] as const;
 export const daemonBindingsQueryKey = ["daemon-bindings"] as const;
 export const daemonHistoryQueryKey = ["daemon-run-history"] as const;
+export const daemonRunMutationKey = ["daemon-run"] as const;
 export const daemonPackageQueryKey = (daemonId: string) =>
   ["daemon-package", daemonId] as const;
 export const daemonScheduleQueryKey = (bindingId: string) =>
@@ -59,16 +65,29 @@ export function useDaemonBindingsQuery() {
   });
 }
 
+type DaemonHistoryRecord = Awaited<
+  ReturnType<typeof listDaemonRunHistory>
+>[number];
+
+export function daemonHistoryRefetchInterval(
+  records: DaemonHistoryRecord[] | undefined,
+  pendingRunCount: number,
+) {
+  return pendingRunCount > 0 ||
+    records?.some(
+      (record) => record.recordType === "managed" && record.status === null,
+    )
+    ? 1_000
+    : false;
+}
+
 export function useDaemonHistoryQuery() {
+  const pendingRunCount = useIsMutating({ mutationKey: daemonRunMutationKey });
   return useQuery({
     queryKey: daemonHistoryQueryKey,
     queryFn: listDaemonRunHistory,
     refetchInterval: (query) =>
-      query.state.data?.some(
-        (record) => record.recordType === "managed" && record.status === null,
-      )
-        ? 1_000
-        : false,
+      daemonHistoryRefetchInterval(query.state.data, pendingRunCount),
   });
 }
 
@@ -159,7 +178,10 @@ export function useDeleteDaemonPackageMutation() {
 export function useRunDaemonMutation(bindingId: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: daemonRunMutationKey,
     mutationFn: runManagedDaemon,
+    onMutate: () =>
+      queryClient.invalidateQueries({ queryKey: daemonHistoryQueryKey }),
     onSettled: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: daemonHistoryQueryKey }),

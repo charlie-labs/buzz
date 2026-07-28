@@ -146,6 +146,13 @@ pub(crate) async fn start(config: &Config) -> anyhow::Result<()> {
     let temp = ready_path.with_extension(format!("{}.tmp", Uuid::new_v4().simple()));
     write_restricted(&temp, &payload)?;
     std::fs::rename(&temp, &ready_path)?;
+    tracing::info!(
+        target: "daemon_control",
+        stage = "control_ready",
+        outcome = "published",
+        pid = std::process::id(),
+        "daemon control endpoint ready"
+    );
     Ok(())
 }
 
@@ -234,6 +241,13 @@ async fn complete(
         outcome: request.outcome,
         markdown,
     });
+    tracing::info!(
+        target: "daemon_control",
+        stage = "completion_callback",
+        outcome = ?request.outcome,
+        run_id = %request.run_id,
+        "daemon completion callback accepted"
+    );
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -248,6 +262,13 @@ async fn execute(
     {
         let mut active = state.active.lock().await;
         if active.contains_key(&request.run_id) {
+            tracing::warn!(
+                target: "daemon_control",
+                stage = "request_acceptance",
+                outcome = "duplicate",
+                run_id = %request.run_id,
+                "daemon run request rejected"
+            );
             return failed(request.run_id, None, "run ID is already active");
         }
         active.insert(
@@ -260,8 +281,24 @@ async fn execute(
         );
     }
 
+    tracing::info!(
+        target: "daemon_control",
+        stage = "request_acceptance",
+        outcome = "accepted",
+        run_id = %request.run_id,
+        "daemon run request accepted"
+    );
+
     let result = execute_inner(&state, &request, &cwd, &callback_token, cancel, &completion).await;
     state.active.lock().await.remove(&request.run_id);
+    tracing::info!(
+        target: "daemon_control",
+        stage = "request_lifecycle",
+        outcome = result.status,
+        run_id = %request.run_id,
+        has_session = result.session_id.is_some(),
+        "daemon run request finished"
+    );
     result
 }
 
@@ -273,6 +310,7 @@ async fn execute_inner(
     cancel: CancellationToken,
     completion: &Arc<Mutex<Option<DaemonCompletion>>>,
 ) -> DaemonRunResponse {
+    tracing::info!(target: "daemon_control", stage = "agent_spawn", outcome = "starting", run_id = %request.run_id, "starting daemon ACP agent");
     let spawn = AcpClient::spawn(
         &state.executor.command,
         &state.executor.args,
@@ -283,28 +321,41 @@ async fn execute_inner(
         result = spawn => Some(result),
         _ = cancel.cancelled() => None,
     } {
-        Some(Ok(client)) => client,
+        Some(Ok(client)) => {
+            tracing::info!(target: "daemon_control", stage = "agent_spawn", outcome = "succeeded", run_id = %request.run_id, "daemon ACP agent started");
+            client
+        }
         Some(Err(error)) => {
+            tracing::warn!(target: "daemon_control", stage = "agent_spawn", outcome = "failed", run_id = %request.run_id, "daemon ACP agent failed to start");
             return failed(request.run_id, None, &safe_diagnostic(&error.to_string()));
         }
-        None => return cancelled(request.run_id, None, "cancelled before agent startup"),
+        None => {
+            tracing::info!(target: "daemon_control", stage = "agent_spawn", outcome = "cancelled", run_id = %request.run_id, "daemon run cancelled before agent startup");
+            return cancelled(request.run_id, None, "cancelled before agent startup");
+        }
     };
     client.disable_wire_payload_logging();
+    tracing::info!(target: "daemon_control", stage = "initialize", outcome = "starting", run_id = %request.run_id, "initializing daemon ACP agent");
     let initialization = tokio::select! {
         result = tokio::time::timeout(Duration::from_secs(60), client.initialize()) => Some(result),
         _ = cancel.cancelled() => None,
     };
     match initialization {
-        Some(Ok(Ok(_))) => {}
+        Some(Ok(Ok(_))) => {
+            tracing::info!(target: "daemon_control", stage = "initialize", outcome = "succeeded", run_id = %request.run_id, "daemon ACP agent initialized")
+        }
         Some(Ok(Err(error))) => {
+            tracing::warn!(target: "daemon_control", stage = "initialize", outcome = "failed", run_id = %request.run_id, "daemon ACP initialization failed");
             bounded_shutdown(&mut client).await;
             return failed(request.run_id, None, &safe_diagnostic(&error.to_string()));
         }
         Some(Err(_)) => {
+            tracing::warn!(target: "daemon_control", stage = "initialize", outcome = "timeout", run_id = %request.run_id, "daemon ACP initialization timed out");
             bounded_shutdown(&mut client).await;
             return failed(request.run_id, None, "agent initialization timed out");
         }
         None => {
+            tracing::info!(target: "daemon_control", stage = "initialize", outcome = "cancelled", run_id = %request.run_id, "daemon ACP initialization cancelled");
             bounded_shutdown(&mut client).await;
             return cancelled(
                 request.run_id,
@@ -316,6 +367,7 @@ async fn execute_inner(
 
     let mcp_servers = daemon_mcp_server(state, request.run_id, callback_token);
     let cwd = cwd.to_string_lossy();
+    tracing::info!(target: "daemon_control", stage = "session_create", outcome = "starting", run_id = %request.run_id, "creating daemon ACP session");
     let session_result = tokio::select! {
         result = tokio::time::timeout(
             Duration::from_secs(60),
@@ -324,16 +376,22 @@ async fn execute_inner(
         _ = cancel.cancelled() => None,
     };
     let session = match session_result {
-        Some(Ok(Ok(session))) => session,
+        Some(Ok(Ok(session))) => {
+            tracing::info!(target: "daemon_control", stage = "session_create", outcome = "succeeded", run_id = %request.run_id, session_id = %session.session_id, "daemon ACP session created");
+            session
+        }
         Some(Ok(Err(error))) => {
+            tracing::warn!(target: "daemon_control", stage = "session_create", outcome = "failed", run_id = %request.run_id, "daemon ACP session creation failed");
             bounded_shutdown(&mut client).await;
             return failed(request.run_id, None, &safe_diagnostic(&error.to_string()));
         }
         Some(Err(_)) => {
+            tracing::warn!(target: "daemon_control", stage = "session_create", outcome = "timeout", run_id = %request.run_id, "daemon ACP session creation timed out");
             bounded_shutdown(&mut client).await;
             return failed(request.run_id, None, "agent session creation timed out");
         }
         None => {
+            tracing::info!(target: "daemon_control", stage = "session_create", outcome = "cancelled", run_id = %request.run_id, "daemon ACP session creation cancelled");
             bounded_shutdown(&mut client).await;
             return cancelled(request.run_id, None, "cancelled during session creation");
         }
@@ -343,6 +401,7 @@ async fn execute_inner(
         "{}\n\nBefore ending, call daemon_complete exactly once. Use succeeded with final markdown when there is user-visible work. Use no_op without markdown only when there is nothing to publish. Do not publish directly to Buzz.",
         request.wake_instruction.trim()
     );
+    tracing::info!(target: "daemon_control", stage = "prompt", outcome = "starting", run_id = %request.run_id, session_id = %session.session_id, "starting daemon ACP prompt");
     let result = tokio::select! {
         result = client.session_prompt_with_idle_timeout(
             &session.session_id,
@@ -361,13 +420,19 @@ async fn execute_inner(
     bounded_shutdown(&mut client).await;
 
     match result {
-        Ok(reason) => terminal_response(
-            request.run_id,
-            session.session_id,
-            reason,
-            completion.lock().await.take(),
-        ),
-        Err(error) => failed(request.run_id, Some(session.session_id), &error),
+        Ok(reason) => {
+            tracing::info!(target: "daemon_control", stage = "prompt", outcome = ?reason, run_id = %request.run_id, session_id = %session.session_id, "daemon ACP prompt reached terminal state");
+            terminal_response(
+                request.run_id,
+                session.session_id,
+                reason,
+                completion.lock().await.take(),
+            )
+        }
+        Err(error) => {
+            tracing::warn!(target: "daemon_control", stage = "prompt", outcome = "failed", run_id = %request.run_id, session_id = %session.session_id, "daemon ACP prompt failed");
+            failed(request.run_id, Some(session.session_id), &error)
+        }
     }
 }
 
